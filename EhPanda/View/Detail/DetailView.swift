@@ -300,6 +300,8 @@ private struct HeaderSection: View {
     }
 
     var body: some View {
+        Spacer()
+            .frame(height: 10)
         HStack {
             KFImage(gallery.coverURL)
                 .placeholder { Placeholder(style: .activity(ratio: Defaults.ImageSize.headerAspect)) }
