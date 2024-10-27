@@ -35,6 +35,7 @@ struct DetailView: View {
     var body: some View {
         ZStack {
             ScrollView(showsIndicators: false) {
+                let content =
                 VStack(spacing: 30) {
                     HeaderSection(
                         gallery: viewStore.gallery,
@@ -108,7 +109,14 @@ struct DetailView: View {
                     )
                 }
                 .padding(.bottom, 20)
-                .padding(.top, -25)
+
+                if #available(iOS 18.0, *) {
+                    content
+                        .padding(.top, 25)
+                } else {
+                    content
+                        .padding(.top, -25)
+                }
             }
             .opacity(viewStore.galleryDetail == nil ? 0 : 1)
             LoadingView()
@@ -300,8 +308,6 @@ private struct HeaderSection: View {
     }
 
     var body: some View {
-        Spacer()
-            .frame(height: 10)
         HStack {
             KFImage(gallery.coverURL)
                 .placeholder { Placeholder(style: .activity(ratio: Defaults.ImageSize.headerAspect)) }
