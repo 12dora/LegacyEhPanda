@@ -57,7 +57,7 @@ struct PreviewsView: View {
                     }
                     .onAppear {
                         if viewStore.databaseLoadingState != .loading
-                            && viewStore.previewURLs[index] == nil && (index - 1) % 20 == 0
+                            && viewStore.previewURLs[index] == nil && (index - 1) % 10 == 0
                         {
                             viewStore.send(.fetchPreviewURLs(index))
                         }
