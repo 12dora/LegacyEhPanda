@@ -51,7 +51,7 @@ struct ReadingView: View {
                         gesture: SimultaneousGesture(magnificationGesture, tapGesture),
                         content: imageStack
                     )
-                    .disabled(gestureHandler.scale != 1)
+                    .scrollDisabled(gestureHandler.scale != 1)
                 } else {
                     Pager(
                         page: page, data: viewStore.state.containerDataSource(setting: setting),
@@ -62,8 +62,15 @@ struct ReadingView: View {
                 }
             }
             .scaleEffect(gestureHandler.scale, anchor: gestureHandler.scaleAnchor)
-            .offset(gestureHandler.offset).gesture(tapGesture).gesture(dragGesture)
-            .gesture(magnificationGesture).ignoresSafeArea()
+            .offset(gestureHandler.offset)
+            // iOS 16-compatible equivalent of gesture(_:isEnabled:) from 2.7.9/2.7.10
+            .highPriorityGesture(
+                dragGesture.simultaneously(with: tapGesture),
+                including: gestureHandler.scale > 1 ? .all : .none
+            )
+            .gesture(tapGesture, including: gestureHandler.scale == 1 ? .all : .none)
+            .gesture(magnificationGesture)
+            .ignoresSafeArea()
             .id(viewStore.databaseLoadingState)
             .id(viewStore.forceRefreshID)
             ControlPanel(
