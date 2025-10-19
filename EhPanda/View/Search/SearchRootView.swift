@@ -43,6 +43,10 @@ struct SearchRootView: View {
                     },
                     removeKeywordAction: { viewStore.send(.removeHistoryKeyword($0)) }
                 )
+                // Workaround: Prevent the large title disappearing when history is empty (iOS 16-safe).
+                if viewStore.historyKeywords.isEmpty && viewStore.historyGalleries.isEmpty {
+                    Text(" ").font(.largeTitle).opacity(0).accessibilityHidden(true)
+                }
             }
             .sheet(
                 unwrapping: viewStore.$route,
