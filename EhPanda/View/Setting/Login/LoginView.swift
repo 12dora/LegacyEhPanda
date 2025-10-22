@@ -60,6 +60,7 @@ struct LoginView: View {
             WebView(url: route.wrappedValue) {
                 viewStore.send(.loginDone(.success(nil)))
             }
+            .ignoresSafeArea(edges: .bottom)
             .autoBlur(radius: blurRadius)
         }
         .onSubmit {

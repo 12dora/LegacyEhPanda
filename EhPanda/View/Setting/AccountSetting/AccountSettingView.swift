@@ -67,6 +67,7 @@ struct AccountSettingView: View {
         )
         .sheet(unwrapping: viewStore.$route, case: /AccountSettingReducer.Route.webView) { route in
             WebView(url: route.wrappedValue)
+                .ignoresSafeArea(edges: .bottom)
                 .autoBlur(radius: blurRadius)
         }
         .onAppear { viewStore.send(.loadCookies) }
