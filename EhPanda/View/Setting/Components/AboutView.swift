@@ -43,11 +43,11 @@ struct AboutView: View {
                     LinkRow(urlString: acknowledgement.urlString, text: acknowledgement.text)
                 }
             }
-        }
-        .navigationTitle(L10n.Localizable.AboutView.Title.ehPanda)
-        .toolbar {
-            ToolbarItem(placement: .largeSubtitle) {
-                VStack(alignment: .leading) {
+            // iOS 16-compatible replacement for ToolbarItem(placement: .largeSubtitle)
+            Section {
+                EmptyView()
+            } footer: {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.Constant.App.copyright)
                     Text(version)
                 }
@@ -57,6 +57,7 @@ struct AboutView: View {
                 .padding(.vertical, 4)
             }
         }
+        .navigationTitle(L10n.Localizable.AboutView.Title.ehPanda)
     }
 
     // MARK: Contacts
