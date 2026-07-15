@@ -1,0 +1,193 @@
+name: Release IPA
+
+# Manual run from Actions tab, or push a version tag: v2.7.5, v2.7.5-1, ...
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 2.7.5). Leave empty to read from Info.plist.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  SCHEME_NAME: EhPanda
+  BUILDS_PATH: ${{ github.workspace }}/.ci-build
+  PAYLOAD_PATH: ${{ github.workspace }}/.ci-build/Payload
+  ARCHIVE_PATH: ${{ github.workspace }}/.ci-build/EhPanda.xcarchive
+  IPA_OUTPUT_PATH: ${{ github.workspace }}/.ci-build/EhPanda.ipa
+  THIN_PAYLOAD_SCRIPT_PATH: ./actions-tool/thin-payload.sh
+
+jobs:
+  build-and-release:
+    name: Build IPA & publish Release
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode / SDK
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | head -40
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Resolve package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project EhPanda.xcodeproj \
+            -scheme "${SCHEME_NAME}" \
+            -clonedSourcePackagesDirPath "${{ github.workspace }}/.spm"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          PLIST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' EhPanda/App/Info.plist)
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' EhPanda/App/Info.plist)
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # tag v2.7.5 or v2.7.5-legacy → strip leading v
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${PLIST_VERSION}"
+          fi
+
+          TAG_NAME="v${VERSION}"
+          # Avoid colliding with an existing tag on re-runs: append build if needed later
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "plist_version=${PLIST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG_NAME} build=${BUILD}"
+
+      - name: Xcode archive (unsigned)
+        id: archive
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p "${BUILDS_PATH}"
+          xcodebuild archive \
+            -project EhPanda.xcodeproj \
+            -scheme "${SCHEME_NAME}" \
+            -skipMacroValidation \
+            -destination 'generic/platform=iOS' \
+            -archivePath "${ARCHIVE_PATH}" \
+            -clonedSourcePackagesDirPath "${{ github.workspace }}/.spm" \
+            -skipPackageUpdates \
+            CODE_SIGN_IDENTITY= \
+            CODE_SIGN_ENTITLEMENTS= \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            GCC_OPTIMIZATION_LEVEL=s \
+            SWIFT_OPTIMIZATION_LEVEL=-O \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: Fallback build if archive destination fails
+        if: steps.archive.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          # Some runner images lack a usable "Any iOS Device" destination; build with -sdk iphoneos instead.
+          mkdir -p "${BUILDS_PATH}/Build"
+          xcodebuild build \
+            -project EhPanda.xcodeproj \
+            -target "${SCHEME_NAME}" \
+            -configuration Release \
+            -skipMacroValidation \
+            -sdk iphoneos \
+            -clonedSourcePackagesDirPath "${{ github.workspace }}/.spm" \
+            -skipPackageUpdates \
+            CODE_SIGN_IDENTITY= \
+            CODE_SIGN_ENTITLEMENTS= \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            GCC_OPTIMIZATION_LEVEL=s \
+            SWIFT_OPTIMIZATION_LEVEL=-O \
+            SYMROOT="${BUILDS_PATH}/Build" \
+            OBJROOT="${BUILDS_PATH}/Obj"
+          mkdir -p "${ARCHIVE_PATH}/Products/Applications"
+          rm -rf "${ARCHIVE_PATH}/Products/Applications/${SCHEME_NAME}.app"
+          cp -R "${BUILDS_PATH}/Build/Release-iphoneos/${SCHEME_NAME}.app" \
+            "${ARCHIVE_PATH}/Products/Applications/${SCHEME_NAME}.app"
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP_SRC="${ARCHIVE_PATH}/Products/Applications/${SCHEME_NAME}.app"
+          test -d "${APP_SRC}"
+          file "${APP_SRC}/${SCHEME_NAME}"
+          lipo -info "${APP_SRC}/${SCHEME_NAME}" || true
+
+          rm -rf "${PAYLOAD_PATH}"
+          mkdir -p "${PAYLOAD_PATH}"
+          cp -R "${APP_SRC}" "${PAYLOAD_PATH}/${SCHEME_NAME}.app"
+
+          chmod +x "${THIN_PAYLOAD_SCRIPT_PATH}"
+          sh "${THIN_PAYLOAD_SCRIPT_PATH}" "${PAYLOAD_PATH}/${SCHEME_NAME}.app" || true
+
+          rm -f "${IPA_OUTPUT_PATH}"
+          (
+            cd "${BUILDS_PATH}"
+            zip -qr "${IPA_OUTPUT_PATH}" Payload
+          )
+          ls -lh "${IPA_OUTPUT_PATH}"
+          echo "ipa_size=$(stat -f%z "${IPA_OUTPUT_PATH}")" >> "$GITHUB_OUTPUT"
+        id: ipa
+
+      - name: Compose release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          BUILD="${{ steps.ver.outputs.build }}"
+          cat > /tmp/release-notes.md <<EOF
+          ## LegacyEhPanda ${VERSION}
+
+          - **Base**: EhPanda v2.7.5 (last line supporting iOS 16)
+          - **Minimum OS**: iOS / iPadOS 16.0+
+          - **Build**: ${BUILD}
+          - **Signing**: unsigned (install via AltStore / SideStore / TrollStore / Sideloadly)
+          - **Commit**: ${GITHUB_SHA}
+
+          ### Notes
+          iOS 16–compatible build with backported site / parser / reader fixes from newer EhPanda releases.
+          Not affiliated with the EhPanda Team.
+
+          ### 说明
+          基于仍支持 iOS 16 的 EhPanda 2.7.5，回移植后续业务修复。
+          **无签名 IPA**，请使用 AltStore / SideStore / TrollStore / Sideloadly 等安装。
+          EOF
+          # softprops needs multiline via env file carefully
+          {
+            echo "body<<RELEASE_BODY_EOF"
+            cat /tmp/release-notes.md
+            echo "RELEASE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag_name }}
+          name: LegacyEhPanda ${{ steps.ver.outputs.version }}
+          body: ${{ steps.notes.outputs.body }}
+          files: ${{ env.IPA_OUTPUT_PATH }}
+          draft: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
