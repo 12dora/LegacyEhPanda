@@ -164,14 +164,27 @@ jobs:
           - **Commit**: ${GITHUB_SHA}
 
           ### Notes
-          iOS 16–compatible build with backported site / parser / reader fixes from newer EhPanda releases.
+          iOS 16-compatible build with backported site / parser / reader fixes from newer EhPanda releases.
           Not affiliated with the EhPanda Team.
 
           ### 说明
           基于仍支持 iOS 16 的 EhPanda 2.7.5，回移植后续业务修复。
-          **无签名 IPA**，请使用 AltStore / SideStore / TrollStore / Sideloadly 等安装。
+          无签名 IPA，请使用 AltStore / SideStore / TrollStore / Sideloadly 等安装。
           EOF
-          # softprops needs multiline via env file carefully
+          # Strip common leading indentation from the heredoc body if present
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/release-notes.md')
+          lines = p.read_text().splitlines()
+          # drop leading blank lines; unindent by min indent of non-empty lines
+          while lines and not lines[0].strip():
+              lines.pop(0)
+          nonempty = [ln for ln in lines if ln.strip()]
+          if nonempty:
+              ind = min(len(ln) - len(ln.lstrip(' ')) for ln in nonempty)
+              lines = [ln[ind:] if len(ln) >= ind else ln for ln in lines]
+          p.write_text('\n'.join(lines) + '\n')
+          PY
           {
             echo "body<<RELEASE_BODY_EOF"
             cat /tmp/release-notes.md
