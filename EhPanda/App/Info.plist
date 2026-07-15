@@ -26,6 +26,13 @@
 					<string>AppIcon_Developer</string>
 				</array>
 			</dict>
+			<key>AppIcon_NotMyPresident</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AppIcon_NotMyPresident</string>
+				</array>
+			</dict>
 			<key>AppIcon_StandWithUkraine2022</key>
 			<dict>
 				<key>CFBundleIconFiles</key>
@@ -38,13 +45,6 @@
 				<key>CFBundleIconFiles</key>
 				<array>
 					<string>AppIcon_Ukiyoe</string>
-				</array>
-			</dict>
-			<key>AppIcon_NotMyPresident</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AppIcon_NotMyPresident</string>
 				</array>
 			</dict>
 		</dict>
@@ -76,6 +76,14 @@
 					<string>AppIcon_Developer_iPad_Pro</string>
 				</array>
 			</dict>
+			<key>AppIcon_NotMyPresident</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AppIcon_NotMyPresident_iPad</string>
+					<string>AppIcon_NotMyPresident_iPad_Pro</string>
+				</array>
+			</dict>
 			<key>AppIcon_StandWithUkraine2022</key>
 			<dict>
 				<key>CFBundleIconFiles</key>
@@ -90,14 +98,6 @@
 				<array>
 					<string>AppIcon_Ukiyoe_iPad</string>
 					<string>AppIcon_Ukiyoe_iPad_Pro</string>
-				</array>
-			</dict>
-			<key>AppIcon_NotMyPresident</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AppIcon_NotMyPresident_iPad</string>
-					<string>AppIcon_NotMyPresident_iPad_Pro</string>
 				</array>
 			</dict>
 		</dict>
@@ -118,7 +118,7 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.7.4</string>
+	<string>2.7.5</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -133,7 +133,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>150</string>
+	<string>151</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
