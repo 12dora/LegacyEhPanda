@@ -310,13 +310,34 @@ struct Parser {
         return galleryURL
     }
     static func parseGalleryDetail(doc: HTMLDocument, gid: String) throws -> (GalleryDetail, GalleryState) {
+        func parseSinglePageCount(from gpcText: String) -> Int? {
+            // Locale-agnostic: "1 - 40" / "1-40" / "1 – 40" (en dash / em dash)
+            let pattern = #"1\s*[-–—]\s*(\d+)"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            let range = NSRange(gpcText.startIndex..., in: gpcText)
+            guard let match = regex.firstMatch(in: gpcText, range: range),
+                  match.numberOfRanges > 1,
+                  let r = Range(match.range(at: 1), in: gpcText)
+            else { return nil }
+            return Int(gpcText[r])
+        }
+
         func parsePreviewConfig(doc: HTMLDocument) throws -> PreviewConfig {
             guard let previewMode = try? parsePreviewMode(doc: doc),
-                  let gpcText = doc.at_xpath("//p [@class='gpc']")?.text,
-                  let rangeA = gpcText.range(of: "Showing 1 - "),
-                  let rangeB = gpcText.range(of: " of "),
-                  let singlePageCount = Int(gpcText[rangeA.upperBound..<rangeB.lowerBound])
+                  let gpcText = doc.at_xpath("//p [@class='gpc']")?.text
             else { throw AppError.parseFailed }
+
+            let singlePageCount: Int
+            if let count = parseSinglePageCount(from: gpcText) {
+                singlePageCount = count
+            } else if let rangeA = gpcText.range(of: "Showing 1 - "),
+                      let rangeB = gpcText.range(of: " of "),
+                      let count = Int(gpcText[rangeA.upperBound..<rangeB.lowerBound]) {
+                // English-only fallback
+                singlePageCount = count
+            } else {
+                throw AppError.parseFailed
+            }
 
             let isLargePreview = previewMode == "gt200"
             let factor = isLargePreview ? 1 : 2
@@ -571,35 +592,43 @@ struct Parser {
 
     // MARK: Preview
     static func parsePreviewURLs(doc: HTMLDocument) throws -> [Int: URL] {
+        func normalizeCSSStyle(_ style: String) -> String {
+            style
+                .replacingOccurrences(of: "; ", with: ";")
+                .replacingOccurrences(of: ": ", with: ":")
+        }
+
         func parseCombinedPreviewURLs(node: XMLElement) -> [Int: URL] {
             var previewURLs = [Int: URL]()
 
             for link in node.xpath("//a") {
                 if let divNode = link.at_xpath(".//div[@title and @style]"),
-                   let style = divNode["style"],
-                   let rangeA = style.range(of: "width:"),
-                   let rangeB = style.range(of: "px;height:"),
-                   let rangeC = style.range(of: "px;background"),
-                   let rangeD = style.range(of: "url("),
-                   let rangeE = style.range(of: ") -"),
-                   let rangeF = style[rangeE.upperBound...].range(of: "px "),
-                   let urlString = style[rangeD.upperBound..<rangeE.lowerBound]
-                       .replacingOccurrences(of: "'", with: "")
-                       .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                   let url = URL(string: urlString),
-                   let title = divNode["title"],
-                   let index = parseGTX00IndexFromTitle(from: title)
-                {
-                    let width = String(style[rangeA.upperBound..<rangeB.lowerBound])
-                    let height = String(style[rangeB.upperBound..<rangeC.lowerBound])
-                    let offset = String(style[rangeE.upperBound..<rangeF.lowerBound])
+                   let rawStyle = divNode["style"] {
+                    let style = normalizeCSSStyle(rawStyle)
+                    if let rangeA = style.range(of: "width:"),
+                       let rangeB = style.range(of: "px;height:"),
+                       let rangeC = style.range(of: "px;background"),
+                       let rangeD = style.range(of: "url("),
+                       let rangeE = style.range(of: ") -"),
+                       let rangeF = style[rangeE.upperBound...].range(of: "px "),
+                       let urlString = style[rangeD.upperBound..<rangeE.lowerBound]
+                           .replacingOccurrences(of: "'", with: "")
+                           .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                       let url = URL(string: urlString),
+                       let title = divNode["title"],
+                       let index = parseGTX00IndexFromTitle(from: title)
+                    {
+                        let width = String(style[rangeA.upperBound..<rangeB.lowerBound])
+                        let height = String(style[rangeB.upperBound..<rangeC.lowerBound])
+                        let offset = String(style[rangeE.upperBound..<rangeF.lowerBound])
 
-                    previewURLs[index] = URLUtil.combinedPreviewURL(
-                        plainURL: url,
-                        width: width,
-                        height: height,
-                        offset: offset
-                    )
+                        previewURLs[index] = URLUtil.combinedPreviewURL(
+                            plainURL: url,
+                            width: width,
+                            height: height,
+                            offset: offset
+                        )
+                    }
                 }
             }
             return previewURLs
@@ -609,17 +638,19 @@ struct Parser {
 
             for link in node.xpath("//a") {
                 if let divNode = link.at_xpath(".//div[@title and @style]"),
-                   let style = divNode["style"],
-                   let rangeA = style.range(of: "url("),
-                   let rangeB = style.range(of: ")"),
-                   let urlString = style[rangeA.upperBound..<rangeB.lowerBound]
-                       .replacingOccurrences(of: "'", with: "")
-                       .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                   let url = URL(string: urlString),
-                   let title = divNode["title"],
-                   let index = parseGTX00IndexFromTitle(from: title)
-                {
-                    previewURLs[index] = url
+                   let rawStyle = divNode["style"] {
+                    let style = normalizeCSSStyle(rawStyle)
+                    if let rangeA = style.range(of: "url("),
+                       let rangeB = style.range(of: ")"),
+                       let urlString = style[rangeA.upperBound..<rangeB.lowerBound]
+                           .replacingOccurrences(of: "'", with: "")
+                           .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                       let url = URL(string: urlString),
+                       let title = divNode["title"],
+                       let index = parseGTX00IndexFromTitle(from: title)
+                    {
+                        previewURLs[index] = url
+                    }
                 }
             }
             return previewURLs

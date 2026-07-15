@@ -43,8 +43,11 @@ struct SearchRootView: View {
                     },
                     removeKeywordAction: { viewStore.send(.removeHistoryKeyword($0)) }
                 )
-                // Workaround: Prevent the large title disappearing when history is empty (iOS 16-safe).
-                if viewStore.historyKeywords.isEmpty && viewStore.historyGalleries.isEmpty {
+                // Workaround: Prevent the large title disappearing when no suggestions are visible (iOS 16-safe).
+                let hasSuggestions = !viewStore.historyKeywords.isEmpty
+                    || !viewStore.historyGalleries.isEmpty
+                    || !viewStore.quickSearchWords.isEmpty
+                if !hasSuggestions {
                     Text(" ").font(.largeTitle).opacity(0).accessibilityHidden(true)
                 }
             }
