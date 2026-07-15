@@ -115,7 +115,7 @@ struct DetailView: View {
                         .padding(.top, 25)
                 } else {
                     content
-                        .padding(.top, -25)
+                        .padding(.top, 8) // was -25; avoid nav bar overlap
                 }
             }
             .opacity(viewStore.galleryDetail == nil ? 0 : 1)

@@ -27,8 +27,9 @@ struct EhSettingReducer: Reducer {
         var submittingState: LoadingState = .idle
 
         mutating func setEhSetting(_ ehSetting: EhSetting) {
-            let ehProfile: EhProfile = ehSetting.ehProfiles
-                .filter(\.isSelected).first.forceUnwrapped
+            guard let ehProfile = ehSetting.ehProfiles.first(where: \.isSelected)
+                    ?? ehSetting.ehProfiles.first
+            else { return }
             self.ehSetting = ehSetting
             self.ehProfile = ehProfile
             editingProfileName = ehProfile.name
