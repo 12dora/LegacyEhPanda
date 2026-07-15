@@ -48,6 +48,21 @@ Upstream 2.7.5 was the last line that still ran on iOS 16. Later releases fixed 
    - TrollStore (if available on your device)  
    - Sideloadly / similar sideloading tools  
 
+### GitHub Actions (recommended)
+
+This repo ships [`.github/workflows/release-ipa.yml`](.github/workflows/release-ipa.yml):
+
+1. Open **Actions → Release IPA → Run workflow**
+2. Optionally set a version (default: `CFBundleShortVersionString` from `Info.plist`)
+3. When finished, the unsigned **`EhPanda.ipa`** is attached to a new [Release](https://github.com/12dora/LegacyEhPanda/releases)
+
+You can also push a tag:
+
+```bash
+git tag v2.7.5
+git push origin v2.7.5
+```
+
 ### Build unsigned IPA (local)
 
 ```bash
@@ -146,10 +161,9 @@ Content shown in the app comes from E-Hentai / ExHentai and is user-generated. *
 
 ## 安装
 
-1. 自行编译无签名 IPA（与上游 AltStore 构建思路类似），或使用你发布的 Release 产物。  
-2. 通过 AltStore / SideStore / TrollStore / Sideloadly 等工具安装。  
-
-本地无签名构建示例见上文英文 **Build unsigned IPA** 一节。
+1. **推荐**：在 GitHub **Actions → Release IPA → Run workflow** 打包，完成后从 [Releases](https://github.com/12dora/LegacyEhPanda/releases) 下载 `EhPanda.ipa`。  
+2. 也可推送标签 `v*` 触发同样流程，或本地按上文英文 **Build unsigned IPA** 自行编译。  
+3. 通过 AltStore / SideStore / TrollStore / Sideloadly 等工具安装无签名包。
 
 ## 主要回移植内容（摘要）
 
