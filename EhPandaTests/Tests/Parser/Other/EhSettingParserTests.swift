@@ -40,7 +40,12 @@ class EhSettingParserTests: XCTestCase, TestHelper {
         XCTAssertEqual(ehSetting.capableLoadThroughHathSettings, EhSetting.LoadThroughHathSetting.allCases)
 
         XCTAssertEqual(ehSetting.capableImageResolution, .x2400)
-        XCTAssertEqual(ehSetting.capableImageResolutions, EhSetting.ImageResolution.allCases)
+        // .x980 is deprecated / removed from site; never offer it in the picker.
+        XCTAssertEqual(
+            ehSetting.capableImageResolutions,
+            EhSetting.ImageResolution.allCases.filter { $0 != .x980 }
+        )
+        XCTAssertFalse(ehSetting.capableImageResolutions.contains(.x980))
 
         XCTAssertEqual(ehSetting.capableSearchResultCount, .oneHundred)
         XCTAssertEqual(ehSetting.capableSearchResultCounts, [.twentyFive, .fifty, .oneHundred])
@@ -62,6 +67,7 @@ class EhSettingParserTests: XCTestCase, TestHelper {
         XCTAssertEqual(ehSetting.archiverBehavior, .manualSelectManualStart)
         XCTAssertEqual(ehSetting.displayMode, .compact)
         XCTAssertEqual(ehSetting.showSearchRangeIndicator, true)
+        XCTAssertEqual(ehSetting.enableGalleryThumbnailSelector, true)
         XCTAssertEqual(ehSetting.disabledCategories, .init(repeating: false, count: 10))
         XCTAssertEqual(ehSetting.favoriteCategories, [
             "Favorites 0", "Favorites 1", "Favorites 2", "Favorites 3", "Favorites 4",

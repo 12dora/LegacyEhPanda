@@ -45,7 +45,7 @@ struct EhSetting: Equatable {
     }
     var capableImageResolutions: [ImageResolution] {
         ImageResolution.allCases.filter { resolution in
-            resolution <= capableImageResolution
+            resolution != .x980 && resolution <= capableImageResolution
         }
     }
     var capableSearchResultCounts: [SearchResultCount] {

@@ -56,8 +56,10 @@ struct PreviewsView: View {
                         Text("\(index)").font(DeviceUtil.isPadWidth ? .callout : .caption).foregroundColor(.secondary)
                     }
                     .onAppear {
+                        let batchSize = max(viewStore.previewConfig.batchSize, 1)
                         if viewStore.databaseLoadingState != .loading
-                            && viewStore.previewURLs[index] == nil && (index - 1) % 10 == 0
+                            && viewStore.previewURLs[index] == nil
+                            && (index - 1) % batchSize == 0
                         {
                             viewStore.send(.fetchPreviewURLs(index))
                         }
