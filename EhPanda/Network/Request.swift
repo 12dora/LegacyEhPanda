@@ -832,9 +832,8 @@ struct SubmitEhSettingChangesRequest: Request {
 
         switch ehSetting.thumbnailConfigSize {
         case .auto: params["ts"] = "0"
-        case .normal: params["ts"] = "1"
+        case .normal, .large: params["ts"] = "1"  // large is deprecated; map to normal
         case .small: params["ts"] = "2"
-        default: break
         }
 
         EhSetting.categoryNames.enumerated().forEach { index, name in
