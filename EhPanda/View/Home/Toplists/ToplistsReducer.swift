@@ -155,12 +155,13 @@ struct ToplistsReducer: Reducer {
                 state.rawLoadingState[type] = .idle
                 switch result {
                 case .success(let (pageNumber, galleries)):
+                    state.rawPageNumber[type] = pageNumber
                     guard !galleries.isEmpty else {
+                        state.rawGalleries[type] = []
                         state.rawLoadingState[type] = .failed(.notFound)
-                        guard pageNumber.hasNextPage() else { return .none }
+                        guard pageNumber.hasNextPage(), type == state.type else { return .none }
                         return .send(.fetchMoreGalleries)
                     }
-                    state.rawPageNumber[type] = pageNumber
                     state.rawGalleries[type] = galleries
                     return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
                 case .failure(let error):
@@ -194,7 +195,7 @@ struct ToplistsReducer: Reducer {
                     var effects: [Effect<Action>] = [
                         .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
                     ]
-                    if galleries.isEmpty, pageNumber.hasNextPage() {
+                    if galleries.isEmpty, pageNumber.hasNextPage(), type == state.type {
                         effects.append(.send(.fetchMoreGalleries))
                     } else if !galleries.isEmpty {
                         state.rawLoadingState[type] = .idle

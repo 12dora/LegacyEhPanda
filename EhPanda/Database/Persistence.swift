@@ -39,6 +39,7 @@ extension PersistenceController {
                 try NSPersistentStoreCoordinator.destroyStore(at: storeURL)
             } catch {
                 completion(.failure(error as? AppError ?? .databaseCorrupted(nil)))
+                return
             }
             container.loadPersistentStores { _, error in
                 guard error == nil else {
@@ -78,6 +79,7 @@ extension PersistenceController {
                     try migrator.migrateStore(at: storeURL, toVersion: try CoreDataMigrationVersion.current())
                 } catch {
                     completion(.failure(error as? AppError ?? .databaseCorrupted(nil)))
+                    return
                 }
                 completion(.success(()))
             }

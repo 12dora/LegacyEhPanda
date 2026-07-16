@@ -66,7 +66,7 @@ struct LoginReducer: Reducer {
                 return .cancel(id: CancelID.login)
 
             case .login:
-                guard !state.loginButtonDisabled || state.loginState == .loading else { return .none }
+                guard !state.loginButtonDisabled, state.loginState != .loading else { return .none }
                 state.focusedField = nil
                 state.loginState = .loading
                 return .merge(
@@ -75,7 +75,7 @@ struct LoginReducer: Reducer {
                         let response = await LoginRequest(username: state.username, password: state.password).response()
                         await send(.loginDone(response))
                     }
-                    .cancellable(id: CancelID.login)
+                    .cancellable(id: CancelID.login, cancelInFlight: true)
                 )
 
             case .loginDone(let result):

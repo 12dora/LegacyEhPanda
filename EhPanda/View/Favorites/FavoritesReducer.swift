@@ -125,14 +125,16 @@ struct FavoritesReducer: Reducer {
                 state.rawLoadingState[targetFavIndex] = .idle
                 switch result {
                 case .success(let (pageNumber, sortOrder, galleries)):
+                    state.rawPageNumber[targetFavIndex] = pageNumber
                     guard !galleries.isEmpty else {
                         state.rawLoadingState[targetFavIndex] = .failed(.notFound)
-                        guard pageNumber.hasNextPage() else { return .none }
+                        guard pageNumber.hasNextPage(), targetFavIndex == state.index else { return .none }
                         return .send(.fetchMoreGalleries)
                     }
-                    state.rawPageNumber[targetFavIndex] = pageNumber
                     state.rawGalleries[targetFavIndex] = galleries
-                    state.sortOrder = sortOrder
+                    if targetFavIndex == state.index {
+                        state.sortOrder = sortOrder
+                    }
                     return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
                 case .failure(let error):
                     state.rawLoadingState[targetFavIndex] = .failed(error)
@@ -164,12 +166,14 @@ struct FavoritesReducer: Reducer {
                 case .success(let (pageNumber, sortOrder, galleries)):
                     state.rawPageNumber[targetFavIndex] = pageNumber
                     state.insertGalleries(index: targetFavIndex, galleries: galleries)
-                    state.sortOrder = sortOrder
+                    if targetFavIndex == state.index {
+                        state.sortOrder = sortOrder
+                    }
 
                     var effects: [Effect<Action>] = [
                         .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
                     ]
-                    if galleries.isEmpty, pageNumber.hasNextPage() {
+                    if galleries.isEmpty, pageNumber.hasNextPage(), targetFavIndex == state.index {
                         effects.append(.send(.fetchMoreGalleries))
                     } else if !galleries.isEmpty {
                         state.rawLoadingState[targetFavIndex] = .idle

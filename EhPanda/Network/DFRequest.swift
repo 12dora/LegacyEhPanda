@@ -19,16 +19,18 @@ struct DFRequest {
         delegate: DFRequestDelegate? = nil
     ) {
         self.delegate = delegate
-        request = req.domainIPReplaced()
+        var preparedRequest = req.domainIPReplaced()
 
         if let url = req.url,
             let cookies = HTTPCookieStorage
             .shared.cookies(for: url) {
-            request.allHTTPHeaderFields = HTTPCookie
-                .requestHeaderFields(with: cookies)
+            for (field, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+                preparedRequest.setValue(value, forHTTPHeaderField: field)
+            }
         }
+        request = preparedRequest
 
-        switch InputStream.create(from: request) {
+        switch InputStream.create(from: preparedRequest) {
         case .success(let stream):
             self.stream = stream
         case .failure(let error):

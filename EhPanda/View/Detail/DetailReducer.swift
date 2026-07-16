@@ -115,6 +115,19 @@ struct DetailReducer: Reducer {
     @Dependency(\.hapticsClient) private var hapticsClient
     @Dependency(\.cookieClient) private var cookieClient
 
+    private var teardownEffect: Effect<Action> {
+        var effects: [Effect<Action>] = CancelID.allCases.map { .cancel(id: $0) }
+        effects.append(contentsOf: [
+            .send(.reading(.teardown)),
+            .send(.archives(.teardown)),
+            .send(.torrents(.teardown)),
+            .send(.previews(.teardown)),
+            .send(.comments(.teardown)),
+            .send(.detailSearch(.teardown))
+        ])
+        return .merge(effects)
+    }
+
     var body: some Reducer<State, Action> {
         RecurseReducer { (self) in
             BindingReducer()
@@ -240,7 +253,7 @@ struct DetailReducer: Reducer {
                     }
 
                 case .teardown:
-                    return .merge(CancelID.allCases.map(Effect.cancel(id:)))
+                    return teardownEffect
 
                 case .fetchDatabaseInfos(let gid):
                     guard let gallery = databaseClient.fetchGallery(gid: gid) else { return .none }

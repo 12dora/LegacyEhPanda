@@ -55,12 +55,12 @@ extension FileClient {
                     return
                 }
 
-                try? FileManager.default.removeItem(at: fileURL)
-
-                if FileManager.default.fileExists(atPath: fileURL.path) {
+                do {
+                    try FileManager.default.removeItem(at: fileURL)
+                    continuation.resume(returning: .success(fileName))
+                } catch {
                     continuation.resume(returning: .failure(.unknown))
                 }
-                continuation.resume(returning: .success(fileName))
             }
         },
         importTagTranslator: { url in

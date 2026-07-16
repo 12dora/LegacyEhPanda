@@ -69,13 +69,26 @@ private extension URLRequest {
         setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
     }
 }
+private func validateHTTPResponse(
+    _ output: (data: Data, response: URLResponse)
+) throws -> (data: Data, response: URLResponse) {
+    guard let response = output.response as? HTTPURLResponse,
+          (200..<300).contains(response.statusCode)
+    else { throw AppError.networkingFailed }
+    return output
+}
 private extension Dictionary where Key == String, Value == String {
-    func dictString() -> String {
-        var array = [String]()
-        keys.forEach { key in
-            array.append(key + "=" + self[key].forceUnwrapped)
+    func formURLEncodedString() -> String {
+        let allowedCharacters = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._*"
+        )
+        func encode(_ value: String) -> String {
+            value.addingPercentEncoding(withAllowedCharacters: allowedCharacters)?
+                .replacingOccurrences(of: "%20", with: "+") ?? ""
         }
-        return array.joined(separator: "&")
+        return sorted(by: { $0.key < $1.key })
+            .map { "\(encode($0.key))=\(encode($0.value))" }
+            .joined(separator: "&")
     }
 }
 
@@ -714,7 +727,7 @@ struct LoginRequest: Request {
 
         var request = URLRequest(url: Defaults.URL.login)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
@@ -770,7 +783,7 @@ struct EhProfileRequest: Request {
 
         var request = URLRequest(url: Defaults.URL.uConfig)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
@@ -863,7 +876,7 @@ struct SubmitEhSettingChangesRequest: Request {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
@@ -891,12 +904,12 @@ struct FavorGalleryRequest: Request {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -914,12 +927,12 @@ struct UnfavorGalleryRequest: Request {
 
         var request = URLRequest(url: Defaults.URL.favorites)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -936,7 +949,7 @@ struct SendDownloadCommandRequest: Request {
 
         var request = URLRequest(url: archiveURL)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
@@ -971,7 +984,7 @@ struct RateGalleryRequest: Request {
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -982,19 +995,18 @@ struct CommentGalleryRequest: Request {
     let galleryURL: URL
 
     var publisher: AnyPublisher<Any, AppError> {
-        let fixedContent = content.replacingOccurrences(of: "\n", with: "%0A")
         let params: [String: String] = [
-            "commenttext_new": fixedContent
+            "commenttext_new": content
         ]
 
         var request = URLRequest(url: galleryURL)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1006,20 +1018,19 @@ struct EditGalleryCommentRequest: Request {
     let galleryURL: URL
 
     var publisher: AnyPublisher<Any, AppError> {
-        let fixedContent = content.replacingOccurrences(of: "\n", with: "%0A")
         let params: [String: String] = [
             "edit_comment": commentID,
-            "commenttext_edit": fixedContent
+            "commenttext_edit": content
         ]
 
         var request = URLRequest(url: galleryURL)
         request.httpMethod = "POST"
-        request.httpBody = params.dictString().urlEncoded.data(using: .utf8)
+        request.httpBody = params.formURLEncodedString().data(using: .utf8)
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1050,7 +1061,7 @@ struct VoteGalleryCommentRequest: Request {
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1081,7 +1092,7 @@ struct VoteGalleryTagRequest: Request {
 
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
-            .map { $0 }
+            .tryMap(validateHTTPResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }

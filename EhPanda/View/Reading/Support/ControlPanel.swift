@@ -318,7 +318,6 @@ private extension SliderPreivew {
         DeviceUtil.isPadWidth ? DeviceUtil.isLandscape ? 7 : 5 : 3
     }
     var previewsIndices: [Int] {
-        guard !previewURLs.isEmpty else { return [] }
         let currentIndex = Int(sliderValue)
         let distance = (previewsCount - 1) / 2
         let lowerBound = currentIndex - distance
