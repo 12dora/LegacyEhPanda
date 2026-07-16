@@ -59,4 +59,34 @@ class ListParserTests: XCTestCase, TestHelper {
         XCTAssertEqual(decoded.folderName, "Offline")
         XCTAssertEqual(decoded.completedCount, 0)
     }
+
+    func testReaderImageCacheKeyIgnoresTemporaryHostAndQuery() throws {
+        let first = try XCTUnwrap(URL(string: "https://a.hath.network/h/hash/file.jpg?dl=1"))
+        let second = try XCTUnwrap(URL(string: "https://b.hath.network/h/hash/file.jpg?download=1"))
+        XCTAssertEqual(first.stableImageCacheKey, second.stableImageCacheKey)
+    }
+
+    func testReaderImageCacheKeyIgnoresHAtHKeystamp() throws {
+        let first = try XCTUnwrap(URL(string:
+            "https://a.hath.network/h/contenthash/keystamp=abc;fileindex=7;xres=org/page.webp"
+        ))
+        let second = try XCTUnwrap(URL(string:
+            "https://b.hath.network/h/contenthash/keystamp=xyz;fileindex=7;xres=org/page.webp"
+        ))
+        XCTAssertEqual(first.stableImageCacheKey, second.stableImageCacheKey)
+        XCTAssertTrue(first.stableImageCacheKey?.contains("fileindex=7;xres=org") == true)
+    }
+
+    func testReaderImageCacheKeyKeepsOrdinaryHostIdentity() throws {
+        let first = try XCTUnwrap(URL(string: "https://a.example/images/page.jpg"))
+        let second = try XCTUnwrap(URL(string: "https://b.example/images/page.jpg"))
+        XCTAssertNotEqual(first.stableImageCacheKey, second.stableImageCacheKey)
+    }
+
+    func testReaderImageAspectRatioUsesHAtHPathDimensions() throws {
+        let url = try XCTUnwrap(URL(string:
+            "https://a.hath.network/h/hash-311480-1280-1920-jpg/keystamp=abc;fileindex=7;xres=1280/page.jpg"
+        ))
+        XCTAssertEqual(try XCTUnwrap(url.readerImageAspectRatio), 2.0 / 3.0, accuracy: 0.0001)
+    }
 }

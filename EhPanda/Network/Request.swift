@@ -37,30 +37,84 @@ extension Request {
     }
 }
 
+private final class PublisherAsyncState<Output> {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Result<Output, AppError>, Never>?
+    private var cancellable: AnyCancellable?
+    private var terminalResult: Result<Output, AppError>?
+    private var isFinished = false
+
+    func install(_ continuation: CheckedContinuation<Result<Output, AppError>, Never>) {
+        lock.lock()
+        if isFinished {
+            let result = terminalResult
+            lock.unlock()
+            continuation.resume(returning: result ?? .failure(.unknown))
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func install(_ cancellable: AnyCancellable) {
+        lock.lock()
+        let shouldCancel = isFinished
+        if !shouldCancel { self.cancellable = cancellable }
+        lock.unlock()
+        if shouldCancel { cancellable.cancel() }
+    }
+
+    func finish(_ result: Result<Output, AppError>) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        terminalResult = result
+        let continuation = continuation
+        self.continuation = nil
+        let cancellable = cancellable
+        self.cancellable = nil
+        lock.unlock()
+
+        cancellable?.cancel()
+        continuation?.resume(returning: result)
+    }
+
+    func cancel() {
+        finish(.failure(.networkingFailed))
+    }
+}
+
 private extension Publisher {
     func genericRetry() -> Publishers.Retry<Self> {
         retry(3)
     }
 
     func async() async -> Result<Output, Failure> where Failure == AppError {
-        await withCheckedContinuation { continuation in
-            var cancellable: AnyCancellable?
-            var finishedWithoutValue = true
-            cancellable = first()
-                .sink { result in
-                    switch result {
-                    case .finished:
-                        if finishedWithoutValue {
-                            continuation.resume(returning: .failure(.unknown))
-                        }
-                    case let .failure(error):
-                        continuation.resume(returning: .failure(error))
-                    }
-                    cancellable?.cancel()
-                } receiveValue: { value in
-                    finishedWithoutValue = false
-                    continuation.resume(returning: .success(value))
+        let state = PublisherAsyncState<Output>()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                state.install(continuation)
+                guard !Task.isCancelled else {
+                    state.cancel()
+                    return
                 }
+                let cancellable = first().sink { completion in
+                    switch completion {
+                    case .finished:
+                        state.finish(.failure(.unknown))
+                    case .failure(let error):
+                        state.finish(.failure(error))
+                    }
+                } receiveValue: { value in
+                    state.finish(.success(value))
+                }
+                state.install(cancellable)
+            }
+        } onCancel: {
+            state.cancel()
         }
     }
 }
@@ -569,14 +623,15 @@ struct ThumbnailURLsRequest: Request {
 
 struct GalleryNormalImageURLsRequest: Request {
     let thumbnailURLs: [Int: URL]
+    var maxConcurrentRequests = 3
 
     var publisher: AnyPublisher<([Int: URL], [Int: URL]), AppError> {
-        thumbnailURLs.publisher
-            .flatMap { index, url in
-                URLSession.shared.dataTaskPublisher(for: url)
-                    .genericRetry()
-                    .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
-                    .tryMap { try Parser.parseGalleryNormalImageURL(doc: $0, index: index) }
+        thumbnailURLs.sorted(by: { $0.key < $1.key }).publisher
+            .flatMap(maxPublishers: .max(max(1, maxConcurrentRequests))) { index, url in
+                GalleryNormalImageURLRequest(index: index, thumbnailURL: url).publisher
+                    // A failed neighbour must not delay or discard every URL in the batch.
+                    // The reducer marks omitted indices as failed and can retry them separately.
+                    .catch { _ in Empty<(Int, URL, URL?), AppError>() }
             }
             .collect()
             .map { tuples in
@@ -588,6 +643,22 @@ struct GalleryNormalImageURLsRequest: Request {
                 }
                 return (imageURLs, originalImageURLs)
             }
+            .mapError(mapAppError)
+            .eraseToAnyPublisher()
+    }
+}
+
+/// Resolves one gallery page URL without waiting for the rest of its thumbnail batch.
+/// Reading uses this request for the visible page before starting bounded neighbour work.
+struct GalleryNormalImageURLRequest: Request {
+    let index: Int
+    let thumbnailURL: URL
+
+    var publisher: AnyPublisher<(Int, URL, URL?), AppError> {
+        URLSession.shared.dataTaskPublisher(for: thumbnailURL)
+            .genericRetry()
+            .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
+            .tryMap { try Parser.parseGalleryNormalImageURL(doc: $0, index: index) }
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
