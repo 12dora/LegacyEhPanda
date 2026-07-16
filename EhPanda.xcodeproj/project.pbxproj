@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		C0D300000000000000000010 /* DownloadsFeature.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300000000000000000011 /* DownloadsFeature.swift */; };
+		C0D300000000000000000020 /* ReaderImageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300000000000000000021 /* ReaderImageCache.swift */; };
 		C0D300000000000000000001 /* KingfisherWebP in Frameworks */ = {isa = PBXBuildFile; productRef = C0D300000000000000000002 /* KingfisherWebP */; };
 		AB0929B6277F043D00F107CA /* AccountSettingReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0929B5277F043D00F107CA /* AccountSettingReducer.swift */; };
 		AB0929BE2780032400F107CA /* EhSettingReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0929BD2780032400F107CA /* EhSettingReducer.swift */; };
@@ -315,6 +316,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C0D300000000000000000021 /* ReaderImageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderImageCache.swift; sourceTree = "<group>"; };
 		C0D300000000000000000011 /* DownloadsFeature.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsFeature.swift; sourceTree = "<group>"; };
 		AB0929B5277F043D00F107CA /* AccountSettingReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSettingReducer.swift; sourceTree = "<group>"; };
 		AB0929BD2780032400F107CA /* EhSettingReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EhSettingReducer.swift; sourceTree = "<group>"; };
@@ -650,6 +652,7 @@
 		AB0929C12781589000F107CA /* Clients */ = {
 			isa = PBXGroup;
 			children = (
+				C0D300000000000000000021 /* ReaderImageCache.swift */,
 				AB0929C72781938A00F107CA /* DFClient.swift */,
 				AB86ABF62782DDE600E61E6A /* FileClient.swift */,
 				ABBB264127942B74007B6149 /* URLClient.swift */,
@@ -1978,6 +1981,7 @@
 				AB7BF2C627A968AB001865A3 /* TranslatableLanguage.swift in Sources */,
 				ABF45AEE25F3313D00ECB568 /* ArchivesView.swift in Sources */,
 				ABBB2677279CDBB0007B6149 /* ImageClient.swift in Sources */,
+				C0D300000000000000000020 /* ReaderImageCache.swift in Sources */,
 				AB706F95278A75D30025A48A /* HistoryView.swift in Sources */,
 				ABEA1FE625A9B40B002966B9 /* Setting.swift in Sources */,
 				ABCA93C02691925900A98BC6 /* GalleryMO+CoreDataClass.swift in Sources */,

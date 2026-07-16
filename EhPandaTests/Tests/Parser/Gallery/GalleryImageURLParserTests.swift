@@ -27,5 +27,33 @@ class GalleryImageURLParserTests: XCTestCase, TestHelper {
         let identifier = try Parser.parseSkipServerIdentifier(doc: doc)
         XCTAssertEqual(identifier, "00000-000000")
     }
-}
 
+    func testReadingPrefetchCandidatesPrioritizeForwardNeighboursAndRespectLimit() {
+        XCTAssertEqual(
+            ReadingReducer.State.prefetchCandidateIndices(center: 5, pageCount: 10, limit: 4),
+            [6, 4, 7, 3]
+        )
+        XCTAssertEqual(
+            ReadingReducer.State.prefetchCandidateIndices(center: 1, pageCount: 10, limit: 3),
+            [2, 3, 4]
+        )
+        XCTAssertEqual(
+            ReadingReducer.State.prefetchCandidateIndices(center: 10, pageCount: 10, limit: 3),
+            [9, 8, 7]
+        )
+        XCTAssertTrue(
+            ReadingReducer.State.prefetchCandidateIndices(center: 1, pageCount: 1, limit: 4).isEmpty
+        )
+    }
+
+    func testFailedImageURLIsNotAutomaticallyRetried() {
+        var state = ReadingReducer.State()
+        XCTAssertTrue(state.allowsAutomaticImageURLFetch(at: 2))
+        state.imageURLLoadingStates[2] = .idle
+        XCTAssertTrue(state.allowsAutomaticImageURLFetch(at: 2))
+        state.imageURLLoadingStates[2] = .loading
+        XCTAssertFalse(state.allowsAutomaticImageURLFetch(at: 2))
+        state.imageURLLoadingStates[2] = .failed(.networkingFailed)
+        XCTAssertFalse(state.allowsAutomaticImageURLFetch(at: 2))
+    }
+}

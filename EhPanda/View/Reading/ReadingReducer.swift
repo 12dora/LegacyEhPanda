@@ -39,6 +39,7 @@ struct ReadingReducer: Reducer {
         case fetchDatabaseInfos
         case fetchPreviewURLs
         case fetchThumbnailURLs
+        case fetchPrioritizedNormalImageURL
         case fetchNormalImageURLs
         case refetchNormalImageURLs
         case fetchMPVKeys
@@ -51,11 +52,11 @@ struct ReadingReducer: Reducer {
         var galleryDetail: GalleryDetail?
         var isOffline = false
 
-        var readingProgress: Int = .zero
-        var forceRefreshID: UUID = .init()
+        var readingProgress: Int = 1
         var hudConfig: AppToastConfig = .loading
 
         var webImageLoadSuccessIndices = Set<Int>()
+        var webImageAutomaticRetryCounts = [Int: Int]()
         var imageURLLoadingStates = [Int: LoadingState]()
         var previewLoadingStates = [Int: LoadingState]()
         var databaseLoadingState: LoadingState = .loading
@@ -66,6 +67,16 @@ struct ReadingReducer: Reducer {
         var thumbnailURLs = [Int: URL]()
         var imageURLs = [Int: URL]()
         var originalImageURLs = [Int: URL]()
+
+        // URL resolution scheduling. Thumbnail pages are shared by many images, so coalesce
+        // page requests while retaining every image that asked for the result.
+        var prioritizedImageIndex = 1
+        var loadingThumbnailPageNumbers = Set<Int>()
+        var pendingThumbnailIndices = [Int: Set<Int>]()
+        var pendingNormalImageURLIndices = Set<Int>()
+        var prioritizedNormalImageURLLoadingIndex: Int?
+        var normalImageURLBatchIndices = Set<Int>()
+        var isNormalImageURLBatchLoading = false
 
         var mpvKey: String?
         var mpvImageKeys = [Int: String]()
@@ -122,6 +133,24 @@ struct ReadingReducer: Reducer {
                 isSecondAvailable: !isFirstPageAndSingle && isValidSecondRange && isDualPage
             )
         }
+
+        static func prefetchCandidateIndices(center: Int, pageCount: Int, limit: Int) -> [Int] {
+            guard pageCount > 1, limit > 0, (1...pageCount).contains(center) else { return [] }
+            var result = [Int]()
+            for distance in 1..<pageCount where result.count < limit {
+                let forward = center + distance
+                if forward <= pageCount { result.append(forward) }
+                if result.count == limit { break }
+                let backward = center - distance
+                if backward >= 1 { result.append(backward) }
+            }
+            return result
+        }
+
+        func allowsAutomaticImageURLFetch(at index: Int) -> Bool {
+            guard let loadingState = imageURLLoadingStates[index] else { return true }
+            return loadingState == .idle
+        }
     }
 
     enum Action: BindableAction {
@@ -163,9 +192,12 @@ struct ReadingReducer: Reducer {
         case prefetchImages(Int, Int)
 
         case fetchThumbnailURLs(Int)
-        case fetchThumbnailURLsDone(Int, Result<[Int: URL], AppError>)
+        case fetchThumbnailURLsDone(Int, Int, Result<[Int: URL], AppError>)
+        case fetchNormalImageURL(Int, URL)
+        case fetchNormalImageURLDone(Int, Result<(Int, URL, URL?), AppError>)
+        case fetchPendingNormalImageURLs(Int)
         case fetchNormalImageURLs(Int, [Int: URL])
-        case fetchNormalImageURLsDone(Int, Result<([Int: URL], [Int: URL]), AppError>)
+        case fetchNormalImageURLsDone(Int, [Int], Result<([Int: URL], [Int: URL]), AppError>)
         case refetchNormalImageURLs(Int)
         case refetchNormalImageURLsDone(Int, Result<([Int: URL], HTTPURLResponse?), AppError>)
 
@@ -224,17 +256,26 @@ struct ReadingReducer: Reducer {
                 return .merge(effects)
 
             case .onWebImageRetry(let index):
-                state.imageURLLoadingStates[index] = .idle
-                return .none
+                state.webImageAutomaticRetryCounts[index] = 0
+                if state.isOffline {
+                    state.imageURLLoadingStates[index] = .idle
+                    return .none
+                }
+                return .send(.refetchImageURLs(index))
 
             case .onWebImageSucceeded(let index):
                 state.imageURLLoadingStates[index] = .idle
+                state.webImageAutomaticRetryCounts[index] = nil
                 state.webImageLoadSuccessIndices.insert(index)
                 return .none
 
             case .onWebImageFailed(let index):
                 state.imageURLLoadingStates[index] = .failed(.webImageFailed)
-                return .none
+                guard !state.isOffline,
+                      state.webImageAutomaticRetryCounts[index, default: 0] < 1
+                else { return .none }
+                state.webImageAutomaticRetryCounts[index, default: 0] += 1
+                return .send(.refetchImageURLs(index))
 
             case .reloadAllWebImages:
                 guard !state.isOffline else { return .none }
@@ -245,15 +286,34 @@ struct ReadingReducer: Reducer {
                 state.mpvKey = nil
                 state.mpvImageKeys = .init()
                 state.mpvSkipServerIdentifiers = .init()
-                state.forceRefreshID = .init()
-                return .run { [state] _ in
-                    await databaseClient.removeImageURLs(gid: state.gallery.id)
-                }
+                state.webImageAutomaticRetryCounts = .init()
+                state.loadingThumbnailPageNumbers = .init()
+                state.pendingThumbnailIndices = .init()
+                state.pendingNormalImageURLIndices = .init()
+                state.prioritizedNormalImageURLLoadingIndex = nil
+                state.normalImageURLBatchIndices = .init()
+                state.isNormalImageURLBatchLoading = false
+                let urlCancelIDs: [CancelID] = [
+                    .fetchPreviewURLs, .fetchThumbnailURLs, .fetchPrioritizedNormalImageURL,
+                    .fetchNormalImageURLs, .refetchNormalImageURLs, .fetchMPVKeys, .fetchMPVImageURL
+                ]
+                return .merge(
+                    .merge(urlCancelIDs.map(Effect.cancel(id:))),
+                    .run { _ in imageClient.prefetchImages([]) },
+                    .run { [state] _ in
+                        await databaseClient.removeImageURLs(gid: state.gallery.id)
+                    }
+                )
 
             case .retryAllFailedWebImages:
+                var retryEffects = [Effect<Action>]()
                 state.imageURLLoadingStates.forEach { (index, loadingState) in
                     if case .failed = loadingState {
                         state.imageURLLoadingStates[index] = .idle
+                        state.webImageAutomaticRetryCounts[index] = 0
+                        if !state.isOffline {
+                            retryEffects.append(.send(.refetchImageURLs(index)))
+                        }
                     }
                 }
                 state.previewLoadingStates.forEach { (index, loadingState) in
@@ -261,7 +321,7 @@ struct ReadingReducer: Reducer {
                         state.previewLoadingStates[index] = .idle
                     }
                 }
-                return .none
+                return retryEffects.isEmpty ? .none : .merge(retryEffects)
 
             case .copyImage(let imageURL):
                 return .send(.fetchImage(.copy(imageURL.isAnimatedImage), imageURL))
@@ -335,7 +395,8 @@ struct ReadingReducer: Reducer {
 
             case .teardown:
                 var effects: [Effect<Action>] = [
-                    .merge(CancelID.allCases.map(Effect.cancel(id:)))
+                    .merge(CancelID.allCases.map(Effect.cancel(id:))),
+                    .run { _ in imageClient.prefetchImages([]) }
                 ]
                 if !deviceClient.isPad() {
                     effects.append(.send(.setOrientationPortrait(true)))
@@ -393,14 +454,22 @@ struct ReadingReducer: Reducer {
 
             case .fetchImageURLs(let index):
                 guard !state.isOffline else { return .none }
+                state.prioritizedImageIndex = index
+                guard state.imageURLs[index] == nil else { return .none }
                 if state.mpvKey != nil {
                     return .send(.fetchMPVImageURL(index, false))
+                } else if let thumbnailURL = state.thumbnailURLs[index] {
+                    return .send(.fetchNormalImageURL(index, thumbnailURL))
                 } else {
                     return .send(.fetchThumbnailURLs(index))
                 }
 
             case .refetchImageURLs(let index):
                 guard !state.isOffline else { return .none }
+                guard state.imageURLs[index] != nil else {
+                    state.imageURLLoadingStates[index] = .idle
+                    return .send(.fetchImageURLs(index))
+                }
                 if state.mpvKey != nil {
                     return .send(.fetchMPVImageURL(index, true))
                 } else {
@@ -408,115 +477,32 @@ struct ReadingReducer: Reducer {
                 }
 
             case .prefetchImages(let index, let prefetchLimit):
-                func getPrefetchImageURLs(range: ClosedRange<Int>) -> [URL] {
-                    (range.lowerBound...range.upperBound).compactMap { index in
-                        if let url = state.imageURLs[index] {
-                            return url
-                        }
-                        return nil
-                    }
-                }
-                func getFetchImageURLIndices(range: ClosedRange<Int>) -> [Int] {
-                    (range.lowerBound...range.upperBound).compactMap { index in
-                        if state.imageURLs[index] == nil, state.imageURLLoadingStates[index] != .loading {
-                            return index
-                        }
-                        return nil
-                    }
-                }
-                var prefetchImageURLs = [URL]()
-                var fetchImageURLIndices = [Int]()
-                var effects = [Effect<Action>]()
-                let previousUpperBound = max(index - 2, 1)
-                let previousLowerBound = max(previousUpperBound - prefetchLimit / 2, 1)
-                if previousUpperBound - previousLowerBound > 0 {
-                    prefetchImageURLs += getPrefetchImageURLs(range: previousLowerBound...previousUpperBound)
-                    fetchImageURLIndices += getFetchImageURLIndices(range: previousLowerBound...previousUpperBound)
-                }
-                let nextLowerBound = min(index + 2, state.gallery.pageCount)
-                let nextUpperBound = min(nextLowerBound + prefetchLimit / 2, state.gallery.pageCount)
-                if nextUpperBound - nextLowerBound > 0 {
-                    prefetchImageURLs += getPrefetchImageURLs(range: nextLowerBound...nextUpperBound)
-                    fetchImageURLIndices += getFetchImageURLIndices(range: nextLowerBound...nextUpperBound)
-                }
-                fetchImageURLIndices.forEach {
-                    effects.append(.send(.fetchImageURLs($0)))
-                }
-                effects.append(
-                    .run { [prefetchImageURLs] _ in
-                        imageClient.prefetchImages(prefetchImageURLs)
-                    }
-                )
-                return .merge(effects)
+                return prefetchImages(state: &state, index: index, limit: prefetchLimit)
 
             case .fetchThumbnailURLs(let index):
-                guard state.imageURLLoadingStates[index] != .loading,
-                      let galleryURL = state.gallery.galleryURL
-                else { return .none }
-                state.previewConfig.batchRange(index: index).forEach {
-                    state.imageURLLoadingStates[$0] = .loading
-                }
-                let pageNum = state.previewConfig.pageNumber(index: index)
-                return .run { send in
-                    let response = await ThumbnailURLsRequest(galleryURL: galleryURL, pageNum: pageNum).response()
-                    await send(.fetchThumbnailURLsDone(index, response))
-                }
-                .cancellable(id: CancelID.fetchThumbnailURLs)
+                return fetchThumbnailURLs(state: &state, index: index)
 
-            case .fetchThumbnailURLsDone(let index, let result):
-                let batchRange = state.previewConfig.batchRange(index: index)
-                switch result {
-                case .success(let thumbnailURLs):
-                    guard !thumbnailURLs.isEmpty else {
-                        batchRange.forEach {
-                            state.imageURLLoadingStates[$0] = .failed(.notFound)
-                        }
-                        return .none
-                    }
-                    if let url = thumbnailURLs[index], urlClient.checkIfMPVURL(url) {
-                        return .send(.fetchMPVKeys(index, url))
-                    } else {
-                        state.updateThumbnailURLs(thumbnailURLs)
-                        return .merge(
-                            .send(.syncThumbnailURLs(thumbnailURLs)),
-                            .send(.fetchNormalImageURLs(index, thumbnailURLs))
-                        )
-                    }
-                case .failure(let error):
-                    batchRange.forEach {
-                        state.imageURLLoadingStates[$0] = .failed(error)
-                    }
-                }
-                return .none
+            case .fetchThumbnailURLsDone(let index, let pageNum, let result):
+                return fetchThumbnailURLsDone(
+                    state: &state, index: index, pageNum: pageNum, result: result
+                )
+
+            case .fetchNormalImageURL(let index, let thumbnailURL):
+                return fetchNormalImageURL(state: &state, index: index, thumbnailURL: thumbnailURL)
+
+            case .fetchNormalImageURLDone(let index, let result):
+                return fetchNormalImageURLDone(state: &state, index: index, result: result)
+
+            case .fetchPendingNormalImageURLs(let index):
+                return fetchPendingNormalImageURLs(state: &state, index: index)
 
             case .fetchNormalImageURLs(let index, let thumbnailURLs):
-                return .run { send in
-                    let response = await GalleryNormalImageURLsRequest(thumbnailURLs: thumbnailURLs).response()
-                    await send(.fetchNormalImageURLsDone(index, response))
-                }
-                .cancellable(id: CancelID.fetchNormalImageURLs)
+                return fetchNormalImageURLs(state: &state, index: index, thumbnailURLs: thumbnailURLs)
 
-            case .fetchNormalImageURLsDone(let index, let result):
-                let batchRange = state.previewConfig.batchRange(index: index)
-                switch result {
-                case .success(let (imageURLs, originalImageURLs)):
-                    guard !imageURLs.isEmpty else {
-                        batchRange.forEach {
-                            state.imageURLLoadingStates[$0] = .failed(.notFound)
-                        }
-                        return .none
-                    }
-                    batchRange.forEach {
-                        state.imageURLLoadingStates[$0] = .idle
-                    }
-                    state.updateImageURLs(imageURLs, originalImageURLs)
-                    return .send(.syncImageURLs(imageURLs, originalImageURLs))
-                case .failure(let error):
-                    batchRange.forEach {
-                        state.imageURLLoadingStates[$0] = .failed(error)
-                    }
-                }
-                return .none
+            case .fetchNormalImageURLsDone(_, let attemptedIndices, let result):
+                return fetchNormalImageURLsDone(
+                    state: &state, attemptedIndices: attemptedIndices, result: result
+                )
 
             case .refetchNormalImageURLs(let index):
                 guard state.imageURLLoadingStates[index] != .loading,
@@ -644,6 +630,257 @@ struct ReadingReducer: Reducer {
             case: /Route.share,
             hapticsClient: hapticsClient
         )
+    }
+
+    private func prefetchImages(state: inout State, index: Int, limit: Int) -> Effect<Action> {
+        guard !state.isOffline, state.gallery.pageCount > 0 else { return .none }
+        state.prioritizedImageIndex = index
+        var effects = [Effect<Action>]()
+        let sortedIndices = State.prefetchCandidateIndices(
+            center: index, pageCount: state.gallery.pageCount, limit: limit
+        )
+        let resolvedURLs = sortedIndices.compactMap { state.imageURLs[$0] }
+        effects.append(.run { [resolvedURLs] _ in imageClient.prefetchImages(resolvedURLs) })
+
+        var resolvableThumbnailURLs = [Int: URL]()
+        for candidateIndex in sortedIndices where state.imageURLs[candidateIndex] == nil {
+            guard state.allowsAutomaticImageURLFetch(at: candidateIndex) else { continue }
+            if let thumbnailURL = state.thumbnailURLs[candidateIndex] {
+                resolvableThumbnailURLs[candidateIndex] = thumbnailURL
+            } else {
+                effects.append(.send(.fetchThumbnailURLs(candidateIndex)))
+            }
+        }
+        if !resolvableThumbnailURLs.isEmpty {
+            effects.append(.send(.fetchNormalImageURLs(index, resolvableThumbnailURLs)))
+        }
+        return effects.isEmpty ? .none : .merge(effects)
+    }
+
+    private func fetchThumbnailURLs(state: inout State, index: Int) -> Effect<Action> {
+        guard state.imageURLs[index] == nil,
+              let galleryURL = state.gallery.galleryURL else { return .none }
+        if let thumbnailURL = state.thumbnailURLs[index] {
+            return .send(.fetchNormalImageURL(index, thumbnailURL))
+        }
+        let pageNum = state.previewConfig.pageNumber(index: index)
+        state.pendingThumbnailIndices[pageNum, default: []].insert(index)
+        state.imageURLLoadingStates[index] = .loading
+        guard state.loadingThumbnailPageNumbers.insert(pageNum).inserted else { return .none }
+        return .run { send in
+            let response = await ThumbnailURLsRequest(
+                galleryURL: galleryURL, pageNum: pageNum
+            ).response()
+            await send(.fetchThumbnailURLsDone(index, pageNum, response))
+        }
+        .cancellable(id: CancelID.fetchThumbnailURLs)
+    }
+
+    private func fetchThumbnailURLsDone(
+        state: inout State,
+        index: Int,
+        pageNum: Int,
+        result: Result<[Int: URL], AppError>
+    ) -> Effect<Action> {
+        state.loadingThumbnailPageNumbers.remove(pageNum)
+        let pendingIndices = state.pendingThumbnailIndices.removeValue(forKey: pageNum) ?? [index]
+        pendingIndices.forEach { state.imageURLLoadingStates[$0] = .idle }
+        switch result {
+        case .success(let thumbnailURLs):
+            guard !thumbnailURLs.isEmpty else {
+                pendingIndices.forEach { state.imageURLLoadingStates[$0] = .failed(.notFound) }
+                return .none
+            }
+            let priorityIndex = closestIndex(
+                in: pendingIndices, to: state.prioritizedImageIndex, fallback: index
+            )
+            if let url = thumbnailURLs[priorityIndex], urlClient.checkIfMPVURL(url) {
+                return .send(.fetchMPVKeys(priorityIndex, url))
+            }
+
+            state.updateThumbnailURLs(thumbnailURLs)
+            let resolvableIndices = pendingIndices.filter {
+                thumbnailURLs[$0] != nil && state.imageURLs[$0] == nil
+            }
+            pendingIndices.subtracting(resolvableIndices).forEach {
+                state.imageURLLoadingStates[$0] = .failed(.notFound)
+            }
+            guard let priorityIndex = closestIndex(
+                in: resolvableIndices, to: state.prioritizedImageIndex
+            ), let priorityURL = thumbnailURLs[priorityIndex] else {
+                return .send(.syncThumbnailURLs(thumbnailURLs))
+            }
+            state.pendingNormalImageURLIndices.formUnion(resolvableIndices)
+            return .merge(
+                .send(.syncThumbnailURLs(thumbnailURLs)),
+                .send(.fetchNormalImageURL(priorityIndex, priorityURL))
+            )
+        case .failure(let error):
+            pendingIndices.forEach { state.imageURLLoadingStates[$0] = .failed(error) }
+            return .none
+        }
+    }
+
+    private func fetchNormalImageURL(
+        state: inout State, index: Int, thumbnailURL: URL
+    ) -> Effect<Action> {
+        guard state.imageURLs[index] == nil else { return .none }
+        if state.isNormalImageURLBatchLoading {
+            let interruptedIndices = state.normalImageURLBatchIndices
+            state.pendingNormalImageURLIndices.formUnion(interruptedIndices)
+            interruptedIndices.forEach { state.imageURLLoadingStates[$0] = .idle }
+            state.normalImageURLBatchIndices = []
+            state.isNormalImageURLBatchLoading = false
+            return .merge(
+                .cancel(id: CancelID.fetchNormalImageURLs),
+                .send(.fetchNormalImageURL(index, thumbnailURL))
+            )
+        }
+        if let loadingIndex = state.prioritizedNormalImageURLLoadingIndex, loadingIndex != index {
+            state.imageURLLoadingStates[loadingIndex] = .idle
+            state.pendingNormalImageURLIndices.insert(loadingIndex)
+        }
+        guard state.imageURLLoadingStates[index] != .loading else { return .none }
+        state.prioritizedNormalImageURLLoadingIndex = index
+        state.imageURLLoadingStates[index] = .loading
+        return .run { send in
+            let response = await GalleryNormalImageURLRequest(
+                index: index, thumbnailURL: thumbnailURL
+            ).response()
+            await send(.fetchNormalImageURLDone(index, response))
+        }
+        .cancellable(id: CancelID.fetchPrioritizedNormalImageURL, cancelInFlight: true)
+    }
+
+    private func fetchNormalImageURLDone(
+        state: inout State,
+        index: Int,
+        result: Result<(Int, URL, URL?), AppError>
+    ) -> Effect<Action> {
+        if state.prioritizedNormalImageURLLoadingIndex == index {
+            state.prioritizedNormalImageURLLoadingIndex = nil
+        }
+        state.pendingNormalImageURLIndices.remove(index)
+        var effects: [Effect<Action>] = [.send(.fetchPendingNormalImageURLs(index))]
+        switch result {
+        case .success(let (_, imageURL, originalImageURL)):
+            let imageURLs = [index: imageURL]
+            let originalImageURLs: [Int: URL]
+            if let originalImageURL {
+                originalImageURLs = [index: originalImageURL]
+            } else {
+                originalImageURLs = [:]
+            }
+            state.imageURLLoadingStates[index] = .idle
+            state.updateImageURLs(imageURLs, originalImageURLs)
+            effects.append(.send(.syncImageURLs(imageURLs, originalImageURLs)))
+        case .failure(let error):
+            state.imageURLLoadingStates[index] = .failed(error)
+        }
+        return .merge(effects)
+    }
+
+    private func fetchPendingNormalImageURLs(state: inout State, index: Int) -> Effect<Action> {
+        let lowerBound = max(1, index - 3)
+        let upperBound = min(state.gallery.pageCount, index + 3)
+        var indices = state.pendingNormalImageURLIndices
+        if lowerBound <= upperBound {
+            indices.formUnion(lowerBound...upperBound)
+        }
+        var thumbnailURLs = [Int: URL]()
+        for candidateIndex in indices {
+            guard state.imageURLs[candidateIndex] == nil,
+                  state.allowsAutomaticImageURLFetch(at: candidateIndex),
+                  let thumbnailURL = state.thumbnailURLs[candidateIndex] else { continue }
+            thumbnailURLs[candidateIndex] = thumbnailURL
+        }
+        guard !thumbnailURLs.isEmpty else { return .none }
+        return .send(.fetchNormalImageURLs(index, thumbnailURLs))
+    }
+
+    private func fetchNormalImageURLs(
+        state: inout State, index: Int, thumbnailURLs: [Int: URL]
+    ) -> Effect<Action> {
+        let availableURLs = thumbnailURLs.filter { candidateIndex, _ in
+            state.imageURLs[candidateIndex] == nil
+                && state.allowsAutomaticImageURLFetch(at: candidateIndex)
+        }
+        state.pendingNormalImageURLIndices.formUnion(availableURLs.keys)
+        guard state.prioritizedNormalImageURLLoadingIndex == nil,
+              !state.isNormalImageURLBatchLoading else { return .none }
+
+        let attemptedIndices = state.pendingNormalImageURLIndices
+            .filter {
+                state.imageURLs[$0] == nil
+                    && state.allowsAutomaticImageURLFetch(at: $0)
+                    && state.thumbnailURLs[$0] != nil
+            }
+            .sorted {
+                let leftDistance = abs($0 - state.prioritizedImageIndex)
+                let rightDistance = abs($1 - state.prioritizedImageIndex)
+                return leftDistance == rightDistance ? $0 > $1 : leftDistance < rightDistance
+            }
+            .prefix(3)
+            .map { $0 }
+        guard !attemptedIndices.isEmpty else { return .none }
+        let pendingURLs = Dictionary(uniqueKeysWithValues: attemptedIndices.compactMap { candidateIndex in
+            let thumbnailURL = availableURLs[candidateIndex] ?? state.thumbnailURLs[candidateIndex]
+            return thumbnailURL.map { (candidateIndex, $0) }
+        })
+        guard pendingURLs.count == attemptedIndices.count else { return .none }
+        state.isNormalImageURLBatchLoading = true
+        state.normalImageURLBatchIndices = Set(attemptedIndices)
+        attemptedIndices.forEach {
+            state.imageURLLoadingStates[$0] = .loading
+            state.pendingNormalImageURLIndices.remove($0)
+        }
+        return .run { send in
+            let response = await GalleryNormalImageURLsRequest(
+                thumbnailURLs: pendingURLs, maxConcurrentRequests: 3
+            ).response()
+            await send(.fetchNormalImageURLsDone(index, attemptedIndices, response))
+        }
+        .cancellable(id: CancelID.fetchNormalImageURLs)
+    }
+
+    private func fetchNormalImageURLsDone(
+        state: inout State,
+        attemptedIndices: [Int],
+        result: Result<([Int: URL], [Int: URL]), AppError>
+    ) -> Effect<Action> {
+        state.isNormalImageURLBatchLoading = false
+        state.normalImageURLBatchIndices = []
+        var effects: [Effect<Action>] = [
+            .send(.fetchPendingNormalImageURLs(state.prioritizedImageIndex))
+        ]
+        switch result {
+        case .success(let (imageURLs, originalImageURLs)):
+            attemptedIndices.forEach { attemptedIndex in
+                state.imageURLLoadingStates[attemptedIndex] = imageURLs[attemptedIndex] == nil
+                    ? .failed(.notFound) : .idle
+            }
+            guard !imageURLs.isEmpty else { return .merge(effects) }
+            state.updateImageURLs(imageURLs, originalImageURLs)
+            let prefetchURLs = imageURLs.sorted(by: { $0.key < $1.key }).map(\.value)
+            effects.append(.send(.syncImageURLs(imageURLs, originalImageURLs)))
+            effects.append(.run { [prefetchURLs] _ in imageClient.prefetchImages(prefetchURLs) })
+            return .merge(effects)
+        case .failure(let error):
+            attemptedIndices.forEach { state.imageURLLoadingStates[$0] = .failed(error) }
+            return .merge(effects)
+        }
+    }
+
+    private func closestIndex(in indices: Set<Int>, to target: Int) -> Int? {
+        indices.min {
+            let leftDistance = abs($0 - target)
+            let rightDistance = abs($1 - target)
+            return leftDistance == rightDistance ? $0 < $1 : leftDistance < rightDistance
+        }
+    }
+
+    private func closestIndex(in indices: Set<Int>, to target: Int, fallback: Int) -> Int {
+        closestIndex(in: indices, to: target) ?? fallback
     }
 }
 

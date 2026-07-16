@@ -12,6 +12,7 @@ import ComposableArchitecture
 
 struct ReadingView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Dependency(\.imageClient) private var imageClient
 
     let store: StoreOf<ReadingReducer>
     @ObservedObject private var viewStore: ViewStoreOf<ReadingReducer>
@@ -24,6 +25,7 @@ struct ReadingView: View {
     @StateObject private var gestureHandler = GestureHandler()
     @StateObject private var pageHandler = PageHandler()
     @StateObject private var page: Page = .first()
+    @State private var didInitializePage = false
 
     init(
         store: StoreOf<ReadingReducer>,
@@ -44,7 +46,9 @@ struct ReadingView: View {
         ZStack {
             backgroundColor.ignoresSafeArea()
             ZStack {
-                if setting.readingDirection == .vertical {
+                if !didInitializePage {
+                    ProgressView()
+                } else if setting.readingDirection == .vertical {
                     AdvancedList(
                         page: page, data: viewStore.state.containerDataSource(setting: setting),
                         id: \.self, spacing: setting.contentDividerHeight,
@@ -71,8 +75,6 @@ struct ReadingView: View {
             .gesture(tapGesture, including: gestureHandler.scale == 1 ? .all : .none)
             .gesture(magnificationGesture)
             .ignoresSafeArea()
-            .id(viewStore.databaseLoadingState)
-            .id(viewStore.forceRefreshID)
             ControlPanel(
                 showsPanel: viewStore.$showsPanel,
                 showsSliderPreview: viewStore.$showsSliderPreview,
@@ -147,7 +149,10 @@ struct ReadingView: View {
         }
         .onChange(of: viewStore.readingProgress) { readingProgress in
             Logger.info("viewStore.readingProgress changed", context: ["readingProgress": readingProgress])
-            pageHandler.sliderValue = .init(readingProgress)
+            initializePageIfReady()
+        }
+        .onChange(of: viewStore.databaseLoadingState) { _ in
+            initializePageIfReady()
         }
 
         // AutoPlay
@@ -188,14 +193,20 @@ struct ReadingView: View {
             liveTextHandler.cancelRequests()
             setAutoPlayPolocy(.off)
         }
-        .onAppear { viewStore.send(.onAppear(gid, setting.enablesLandscape)) }
+        .onAppear {
+            viewStore.send(.onAppear(gid, setting.enablesLandscape))
+            initializePageIfReady()
+        }
     }
 
     @ViewBuilder private func imageStack(index: Int) -> some View {
         let imageStackConfig = viewStore.state.imageContainerConfigs(index: index, setting: setting)
         let isDualPage = setting.enablesDualPageMode && setting.readingDirection != .vertical && DeviceUtil.isLandscape
+        let dataSource = viewStore.state.containerDataSource(setting: setting)
+        let activeStackIndex = dataSource.indices.contains(page.index) ? dataSource[page.index] : nil
         HorizontalImageStack(
-            index: index, isDualPage: isDualPage, isDatabaseLoading: viewStore.databaseLoadingState != .idle,
+            index: index, isDualPage: isDualPage, isActive: index == activeStackIndex,
+            isDatabaseLoading: viewStore.databaseLoadingState != .idle,
             backgroundColor: backgroundColor, config: imageStackConfig, imageURLs: viewStore.imageURLs,
             originalImageURLs: viewStore.originalImageURLs, loadingStates: viewStore.imageURLLoadingStates,
             enablesLiveText: liveTextHandler.enablesLiveText, liveTextGroups: liveTextHandler.liveTextGroups,
@@ -216,6 +227,16 @@ struct ReadingView: View {
 
 // MARK: Handler methods
 extension ReadingView {
+    func initializePageIfReady() {
+        guard !didInitializePage, viewStore.databaseLoadingState == .idle else { return }
+        let pageCount = max(1, viewStore.gallery.pageCount)
+        let readingProgress = min(max(viewStore.readingProgress, 1), pageCount)
+        pageHandler.sliderValue = Float(readingProgress)
+        let pageIndex = pageHandler.mapToPager(index: readingProgress, setting: setting)
+        page.update(.new(index: max(0, pageIndex)))
+        didInitializePage = true
+    }
+
     func setPageIndex(sliderValue: Float) {
         let newValue = pageHandler.mapToPager(
             index: .init(sliderValue), setting: setting
@@ -237,14 +258,15 @@ extension ReadingView {
             Logger.info("analyzeImageForLiveText duplicated", context: ["index": index])
             return
         }
-        guard let key = viewStore.imageURLs[index]?.absoluteString else {
+        guard let url = viewStore.imageURLs[index] else {
             Logger.info("analyzeImageForLiveText URL not found", context: ["index": index])
             return
         }
-        KingfisherManager.shared.cache.retrieveImage(forKey: key) { result in
+        Task { @MainActor in
+            let result = await imageClient.fetchImage(url: url)
             switch result {
-            case .success(let result):
-                if let image = result.image, let cgImage = image.cgImage {
+            case .success(let image):
+                if let cgImage = image.cgImage {
                     liveTextHandler.analyzeImage(
                         cgImage, size: image.size, index: index, recognitionLanguages:
                             viewStore.galleryDetail?.language.codes
@@ -321,6 +343,7 @@ extension ReadingView {
 private struct HorizontalImageStack: View {
     private let index: Int
     private let isDualPage: Bool
+    private let isActive: Bool
     private let isDatabaseLoading: Bool
     private let backgroundColor: Color
     private let config: ImageStackConfig
@@ -342,7 +365,7 @@ private struct HorizontalImageStack: View {
     private let shareImageAction: (URL) -> Void
 
     init(
-        index: Int, isDualPage: Bool, isDatabaseLoading: Bool, backgroundColor: Color,
+        index: Int, isDualPage: Bool, isActive: Bool, isDatabaseLoading: Bool, backgroundColor: Color,
         config: ImageStackConfig, imageURLs: [Int: URL], originalImageURLs: [Int: URL],
         loadingStates: [Int: LoadingState], enablesLiveText: Bool,
         liveTextGroups: [Int: [LiveTextGroup]], focusedLiveTextGroup: LiveTextGroup?,
@@ -355,6 +378,7 @@ private struct HorizontalImageStack: View {
     ) {
         self.index = index
         self.isDualPage = isDualPage
+        self.isActive = isActive
         self.isDatabaseLoading = isDatabaseLoading
         self.backgroundColor = backgroundColor
         self.config = config
@@ -404,14 +428,25 @@ private struct HorizontalImageStack: View {
             loadFailedAction: loadFailedAction
         )
         .onAppear {
-            if !isDatabaseLoading {
-                if imageURLs[index] == nil {
-                    fetchAction(index)
-                }
-                prefetchAction(index)
-            }
+            activate(index: index)
+        }
+        .onChange(of: isActive) { isActive in
+            if isActive { activate(index: index) }
+        }
+        .onChange(of: isDatabaseLoading) { isLoading in
+            if !isLoading { activate(index: index) }
+        }
+        .onChange(of: imageURLs[index]) { imageURL in
+            if imageURL == nil { activate(index: index) }
         }
         .contextMenu { contextMenuItems(index: index) }
+    }
+    private func activate(index: Int) {
+        guard isActive, !isDatabaseLoading else { return }
+        if imageURLs[index] == nil {
+            fetchAction(index)
+        }
+        prefetchAction(index)
     }
     @ViewBuilder private func contextMenuItems(index: Int) -> some View {
         Button {
@@ -455,7 +490,7 @@ private struct ImageContainer: View {
         DeviceUtil.windowW / (isDualPage ? 2 : 1)
     }
     private var height: CGFloat {
-        width / Defaults.ImageSize.contentAspect
+        width / (imageURL?.readerImageAspectRatio ?? Defaults.ImageSize.contentAspect)
     }
 
     private let index: Int
@@ -508,18 +543,31 @@ private struct ImageContainer: View {
         ))
         .frame(width: width, height: height)
     }
+    // Reader pages are cached under a keystamp/host-normalized key, so a refetched
+    // H@H URL for the same page (new node or new signature) is a cache hit instead
+    // of a full re-download.
+    private func cacheKey(url: URL?) -> String? {
+        guard let url else { return nil }
+        return url.isFileURL ? url.path : (url.stableImageCacheKey ?? url.absoluteString)
+    }
+
     @ViewBuilder private func image(url: URL?) -> some View {
         if url?.isAnimatedImage != true {
-            KFImage.url(url, cacheKey: url?.isFileURL == true ? url?.path : url?.absoluteString)
+            KFImage.url(url, cacheKey: cacheKey(url: url))
                 .cacheMemoryOnly(url?.isFileURL == true)
                 .placeholder(placeholder)
                 .defaultModifier(withRoundedCorners: false)
+                .backgroundDecode()
+                .retry(maxCount: 2, interval: .seconds(1))
                 .onSuccess(onSuccess).onFailure(onFailure)
         } else {
-            KFAnimatedImage(url)
-                .cacheMemoryOnly(url?.isFileURL == true)
-                .placeholder(placeholder).fade(duration: 0.25)
-                .onSuccess(onSuccess).onFailure(onFailure)
+            KFAnimatedImage(source: url.map {
+                .network(KF.ImageResource(downloadURL: $0, cacheKey: cacheKey(url: $0)))
+            })
+            .cacheMemoryOnly(url?.isFileURL == true)
+            .placeholder(placeholder).fade(duration: 0.25)
+            .retry(maxCount: 2, interval: .seconds(1))
+            .onSuccess(onSuccess).onFailure(onFailure)
         }
     }
 
@@ -564,10 +612,18 @@ private struct ImageContainer: View {
     private func onSuccess(_: RetrieveImageResult) {
         loadSucceededAction(index)
     }
-    private func onFailure(_: KingfisherError) {
-        if imageURL != nil {
-            loadFailedAction(index)
-        }
+    private func onFailure(_ error: KingfisherError) {
+        guard imageURL != nil else { return }
+        // A cancelled or superseded task is not a load failure: it fires when the URL is
+        // refreshed mid-flight or a cell is recycled, and marking it failed would burn
+        // the automatic retry and strand the page on the error placeholder.
+        guard !error.isTaskCancelled, !error.isNotCurrentTask else { return }
+        Logger.error("Reader image failed", context: [
+            "index": index,
+            "host": imageURL?.host ?? "nil",
+            "error": error.localizedDescription
+        ])
+        loadFailedAction(index)
     }
 }
 

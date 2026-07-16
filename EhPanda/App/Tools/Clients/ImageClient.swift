@@ -9,6 +9,7 @@ import Photos
 import SwiftUI
 import Combine
 import Kingfisher
+import KingfisherWebP
 import ComposableArchitecture
 
 struct ImageClient {
@@ -16,12 +17,16 @@ struct ImageClient {
     let saveImageToPhotoLibrary: (UIImage, Bool) async -> Bool
     let downloadImage: (URL) async -> Result<UIImage, Error>
     let retrieveImage: (String) async -> Result<UIImage, Error>
+    let loadReaderImageAsset:
+        (URL, (@MainActor (Double) -> Void)?) async -> Result<ReaderImageAsset, Error>
 }
 
 extension ImageClient {
     static let live: Self = .init(
         prefetchImages: { urls in
-            ImagePrefetcher(urls: urls).start()
+            Task { @MainActor in
+                ReaderImagePrefetchCoordinator.shared.update(urls: urls)
+            }
         },
         saveImageToPhotoLibrary: { (image, isAnimated) in
             await withCheckedContinuation { continuation in
@@ -51,7 +56,11 @@ extension ImageClient {
         },
         retrieveImage: { key in
             await withCheckedContinuation { continuation in
-                KingfisherManager.shared.cache.retrieveImage(forKey: key) { result in
+                // Reader images are stored with the WebP processor applied, which is part
+                // of the effective cache key; omitting it here would always miss.
+                KingfisherManager.shared.cache.retrieveImage(
+                    forKey: key, options: [.processor(WebPProcessor.default)]
+                ) { result in
                     switch result {
                     case .success(let result):
                         if let image = result.image {
@@ -64,24 +73,39 @@ extension ImageClient {
                     }
                 }
             }
-        }
-    )
-
-    func fetchImage(url: URL) async -> Result<UIImage, Error> {
-        if url.isFileURL {
+        },
+        loadReaderImageAsset: { url, onProgress in
             do {
-                let data = try Data(contentsOf: url)
-                guard let image = UIImage(data: data) else { return .failure(AppError.parseFailed) }
-                return .success(image)
+                return .success(try await ReaderImagePipeline.shared.asset(
+                    for: url, priority: .userInitiated, onProgress: onProgress
+                ))
             } catch {
                 return .failure(error)
             }
         }
-        if KingfisherManager.shared.cache.isCached(forKey: url.absoluteString) {
-            return await retrieveImage(url.absoluteString)
-        } else {
-            return await downloadImage(url)
+    )
+
+    func fetchImage(url: URL) async -> Result<UIImage, Error> {
+        if !url.isFileURL {
+            for key in [url.stableImageCacheKey, url.absoluteString].compactMap({ $0 }) {
+                if case .success(let image) = await retrieveImage(key) {
+                    return .success(image)
+                }
+            }
         }
+        switch await loadReaderImageAsset(url, nil) {
+        case .success(let asset):
+            return .success(asset.image)
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    func fetchReaderImage(
+        url: URL,
+        onProgress: (@MainActor (Double) -> Void)? = nil
+    ) async -> Result<ReaderImageAsset, Error> {
+        await loadReaderImageAsset(url, onProgress)
     }
 }
 
@@ -122,13 +146,17 @@ extension ImageClient {
         prefetchImages: { _ in },
         saveImageToPhotoLibrary: { _, _ in false },
         downloadImage: { _ in .success(UIImage()) },
-        retrieveImage: { _ in .success(UIImage()) }
+        retrieveImage: { _ in .success(UIImage()) },
+        loadReaderImageAsset: { _, _ in
+            .success(ReaderImageAsset(image: UIImage(), data: Data()))
+        }
     )
 
     static let unimplemented: Self = .init(
         prefetchImages: XCTestDynamicOverlay.unimplemented("\(Self.self).prefetchImages"),
         saveImageToPhotoLibrary: XCTestDynamicOverlay.unimplemented("\(Self.self).saveImageToPhotoLibrary"),
         downloadImage: XCTestDynamicOverlay.unimplemented("\(Self.self).downloadImage"),
-        retrieveImage: XCTestDynamicOverlay.unimplemented("\(Self.self).retrieveImage")
+        retrieveImage: XCTestDynamicOverlay.unimplemented("\(Self.self).retrieveImage"),
+        loadReaderImageAsset: XCTestDynamicOverlay.unimplemented("\(Self.self).loadReaderImageAsset")
     )
 }

@@ -54,12 +54,18 @@ extension LibraryClient {
             #endif
         },
         initializeWebImage: {
+            Task { @MainActor in
+                _ = ReaderImageCacheLifecycle.shared
+            }
             let config = KingfisherManager.shared.downloader.sessionConfiguration
             config.httpCookieStorage = HTTPCookieStorage.shared
             config.httpAdditionalHeaders = [
                 "Accept": "image/webp,image/png,image/gif,image/jpeg,image/*,*/*;q=0.8"
             ]
             KingfisherManager.shared.downloader.sessionConfiguration = config
+            // H@H nodes are frequently slow to the first byte; the 15s default turns
+            // slow-but-healthy nodes into spurious load failures.
+            KingfisherManager.shared.downloader.downloadTimeout = 30
             KingfisherManager.shared.defaultOptions += [
                 .processor(WebPProcessor.default),
                 .cacheSerializer(WebPSerializer.default)
@@ -67,6 +73,10 @@ extension LibraryClient {
         },
         clearWebImageDiskCache: {
             KingfisherManager.shared.cache.clearDiskCache()
+            Task {
+                await ReaderImagePipeline.shared.removeAllMemory()
+                try? await ReaderImageDataCache.shared.removeAll()
+            }
         },
         analyzeImageColors: { image in
             await withCheckedContinuation { continuation in
@@ -76,11 +86,13 @@ extension LibraryClient {
             }
         },
         calculateWebImageDiskCacheSize: {
-            await withCheckedContinuation { continuation in
+            let kingfisherSize: UInt? = await withCheckedContinuation { continuation in
                 KingfisherManager.shared.cache.calculateDiskStorageSize {
                     continuation.resume(returning: try? $0.get())
                 }
             }
+            let readerSize = await ReaderImageDataCache.shared.totalSize()
+            return (kingfisherSize ?? 0) + UInt(readerSize)
         }
     )
 }
