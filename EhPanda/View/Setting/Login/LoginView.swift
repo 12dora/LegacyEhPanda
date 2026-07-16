@@ -51,7 +51,8 @@ struct LoginView: View {
                     }
                     .overlay { ProgressView().tint(nil).opacity(viewStore.loginState == .loading ? 1 : 0) }
                     .imageScale(.large).font(.largeTitle).foregroundColor(viewStore.loginButtonColor)
-                    .disabled(viewStore.loginButtonDisabled).padding(.top, 30)
+                    .disabled(viewStore.loginButtonDisabled || viewStore.loginState == .loading)
+                    .padding(.top, 30)
                 }
             }
         }

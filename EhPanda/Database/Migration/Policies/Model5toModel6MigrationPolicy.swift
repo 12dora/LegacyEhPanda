@@ -58,14 +58,18 @@ final class GalleryStateMO5toGalleryStateMO6MigrationPolicy: NSEntityMigrationPo
         ).first else {
             throw AppError.databaseCorrupted("Was expected a GalleryStateMO.")
         }
-        let previews = sourceInstance.value(forKey: "previews") as? [Int: String]
-        let thumbnails = sourceInstance.value(forKey: "thumbnails") as? [Int: String]
-        let contents = sourceInstance.value(forKey: "contents") as? [Int: String]
-        let originalContents = sourceInstance.value(forKey: "originalContents") as? [Int: String]
-        destinationGalleryStateMO.setValue(previews?.mapToURLs, forKey: "previewURLs")
-        destinationGalleryStateMO.setValue(thumbnails?.mapToURLs, forKey: "thumbnailURLs")
-        destinationGalleryStateMO.setValue(contents?.mapToURLs, forKey: "imageURLs")
-        destinationGalleryStateMO.setValue(originalContents?.mapToURLs, forKey: "originalImageURLs")
+        func migrateURLs(sourceKey: String) -> Data? {
+            guard let data = sourceInstance.value(forKey: sourceKey) as? Data,
+                  let strings: [Int: String] = data.toObject()
+            else { return nil }
+            return strings.mapToURLs().toData()
+        }
+        destinationGalleryStateMO.setValue(migrateURLs(sourceKey: "previews"), forKey: "previewURLs")
+        destinationGalleryStateMO.setValue(migrateURLs(sourceKey: "thumbnails"), forKey: "thumbnailURLs")
+        destinationGalleryStateMO.setValue(migrateURLs(sourceKey: "contents"), forKey: "imageURLs")
+        destinationGalleryStateMO.setValue(
+            migrateURLs(sourceKey: "originalContents"), forKey: "originalImageURLs"
+        )
     }
 }
 // swiftlint:enable type_name

@@ -243,14 +243,15 @@ struct CommentsReducer: Reducer {
                 state.route = nil
                 switch result {
                 case .success(let gallery):
-                    return .merge(
-                        .run(operation: { _ in await databaseClient.cacheGalleries([gallery]) }),
-                        .send(.handleGalleryLink(url))
-                    )
+                    return .run { send in
+                        await databaseClient.cacheGalleries([gallery])
+                        await send(.handleGalleryLink(url))
+                    }
                 case .failure:
                     return .run { send in
                         try await Task.sleep(for: .milliseconds(500))
                         await send(.setHUDConfig(.error))
+                        await send(.setNavigation(.hud))
                     }
                 }
 

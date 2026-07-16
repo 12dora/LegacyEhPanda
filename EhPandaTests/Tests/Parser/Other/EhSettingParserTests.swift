@@ -18,6 +18,21 @@ class EhSettingParserTests: XCTestCase, TestHelper {
         testRemainingStuff(ehSetting: ehSetting)
     }
 
+    func testMissingThumbnailSelectorDefaultsToEnabled() throws {
+        guard let url = Bundle(for: Self.self).url(forResource: HTMLFilename.ehSetting.rawValue, withExtension: "html")
+        else { throw TestError.htmlDocumentNotFound(.ehSetting) }
+        let html = try String(contentsOf: url).replacingOccurrences(
+            of: #"<input[^>]*name="xn_0"[^>]*>"#,
+            with: "",
+            options: .regularExpression
+        )
+        let document = try Kanna.HTML(html: html, encoding: .utf8)
+
+        let ehSetting = try Parser.parseEhSetting(doc: document)
+
+        XCTAssertTrue(ehSetting.enableGalleryThumbnailSelector)
+    }
+
     func testEhProfiles(_ profiles: [EhProfile]) {
         XCTAssertEqual(profiles.count, 3)
         

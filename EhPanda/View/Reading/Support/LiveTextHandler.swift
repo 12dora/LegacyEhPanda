@@ -23,16 +23,21 @@ final class LiveTextHandler: ObservableObject {
     @Published private(set) var focusedLiveTextGroup: LiveTextGroup?
 
     private var processingRequests = [VNRequest]()
+    private let processingRequestsLock = NSLock()
 
     deinit {
         cancelRequests()
     }
 
     func cancelRequests() {
+        processingRequestsLock.lock()
+        let requests = processingRequests
+        processingRequests.removeAll()
+        processingRequestsLock.unlock()
         Logger.info("cancelRequests", context: [
-            "processingRequestsCount": processingRequests.count
+            "processingRequestsCount": requests.count
         ])
-        processingRequests.forEach { request in
+        requests.forEach { request in
             request.cancel()
         }
     }
@@ -57,7 +62,9 @@ final class LiveTextHandler: ObservableObject {
             textRecognitionRequest.recognitionLanguages = languages
         }
 
+        processingRequestsLock.lock()
         processingRequests.append(textRecognitionRequest)
+        processingRequestsLock.unlock()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             do {
@@ -70,6 +77,8 @@ final class LiveTextHandler: ObservableObject {
     }
 
     private func removeRequest(_ request: VNRequest) {
+        processingRequestsLock.lock()
+        defer { processingRequestsLock.unlock() }
         if let index = processingRequests.firstIndex(of: request) {
             processingRequests.remove(at: index)
         }

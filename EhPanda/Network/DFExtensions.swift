@@ -149,7 +149,6 @@ extension URLRequest {
         defer {
             stream.close()
             buffer.deallocate()
-            buffer.deinitialize(count: bufferSize)
         }
 
         var body = Data()

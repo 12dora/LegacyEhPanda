@@ -580,8 +580,11 @@ struct ReadingReducer: Reducer {
                     }
                     state.mpvKey = mpvKey
                     state.mpvImageKeys = mpvImageKeys
+                    let initialIndices = Set(
+                        Array(1...min(3, max(1, pageCount))) + [index]
+                    ).sorted()
                     return .merge(
-                        Array(1...min(3, max(1, pageCount))).map {
+                        initialIndices.map {
                             .send(.fetchMPVImageURL($0, false))
                         }
                     )

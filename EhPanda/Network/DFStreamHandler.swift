@@ -36,6 +36,8 @@ private extension DFStreamEventHandler {
                     request.request,
                     didFailWithError: err
                 )
+                request.stop()
+                return
             }
         }
 
@@ -64,7 +66,6 @@ private extension DFStreamEventHandler {
         if readCount > 0 { data.append(buffer, count: readCount) }
 
         buffer.deallocate()
-        buffer.deinitialize(count: bufferSize)
         return data
     }
 
@@ -152,19 +153,20 @@ private extension DFStreamEventHandler {
             guard let headerFields = message?.allHeaderFields,
                   let hostKey = headerFields.keys
                     .first(where: { $0.lowercased() == "location" }),
-                  let loction = headerFields[hostKey],
-                  var url = URL(string: loction)
+                  let location = headerFields[hostKey],
+                  var baseComponents = request.request.url.flatMap({
+                      URLComponents(url: $0, resolvingAgainstBaseURL: false)
+                  })
             else {
                 finish()
                 return
             }
-
-            if ["/", "/popular", "/watched"].contains(url.absoluteString)
-                || ["/?f_search"].contains(where: url.absoluteString.contains),
-               let domain = request.request.domainWithScheme,
-               let originalURL = URL(string: domain)
-            {
-                url = originalURL.appendingPathComponent(url.absoluteString)
+            baseComponents.host = request.request.domain
+            guard let baseURL = baseComponents.url,
+                  let url = URL(string: location, relativeTo: baseURL)?.absoluteURL
+            else {
+                finish()
+                return
             }
 
             Logger.warning("Request redirected to: \(url.absoluteString).")
