@@ -99,8 +99,8 @@ struct ReadingView: View {
                     doubleTapScaleFactor: $setting.doubleTapScaleFactor
                 )
                 .toolbar {
-                    CustomToolbarItem(placement: .cancellationAction) {
-                        if !DeviceUtil.isPad && DeviceUtil.isLandscape {
+                    if !DeviceUtil.isPad && DeviceUtil.isLandscape {
+                        CustomToolbarItem(placement: .cancellationAction) {
                             Button {
                                 viewStore.send(.setNavigation(nil))
                             } label: {
@@ -509,13 +509,15 @@ private struct ImageContainer: View {
         .frame(width: width, height: height)
     }
     @ViewBuilder private func image(url: URL?) -> some View {
-        if url?.isGIF != true {
-            KFImage(url)
+        if url?.isAnimatedImage != true {
+            KFImage.url(url, cacheKey: url?.isFileURL == true ? url?.path : url?.absoluteString)
+                .cacheMemoryOnly(url?.isFileURL == true)
                 .placeholder(placeholder)
                 .defaultModifier(withRoundedCorners: false)
                 .onSuccess(onSuccess).onFailure(onFailure)
         } else {
             KFAnimatedImage(url)
+                .cacheMemoryOnly(url?.isFileURL == true)
                 .placeholder(placeholder).fade(duration: 0.25)
                 .onSuccess(onSuccess).onFailure(onFailure)
         }

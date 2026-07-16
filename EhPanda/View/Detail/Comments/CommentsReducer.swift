@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import TTProgressHUD
 import ComposableArchitecture
 
 struct CommentsReducer: Reducer {
@@ -25,7 +24,7 @@ struct CommentsReducer: Reducer {
         @BindingState var commentContent = ""
         @BindingState var postCommentFocused = false
 
-        var hudConfig: TTProgressHUDConfig = .loading
+        var hudConfig: AppToastConfig = .loading
         var scrollCommentID: String?
         var scrollRowOpacity: Double = 1
 
@@ -42,7 +41,7 @@ struct CommentsReducer: Reducer {
         case clearSubStates
         case clearScrollCommentID
 
-        case setHUDConfig(TTProgressHUDConfig)
+        case setHUDConfig(AppToastConfig)
         case setPostCommentFocused(Bool)
         case setScrollRowOpacity(Double)
         case setCommentContent(String)

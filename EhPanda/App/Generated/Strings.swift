@@ -44,8 +44,8 @@ internal enum L10n {
           internal static let swiftyOpenCC = L10n.tr("Constant", "app.acknowledgement.link.swiftyOpenCC", fallback: "https://github.com/ddddxxx/SwiftyOpenCC")
           /// https://github.com/pointfreeco/swift-composable-architecture
           internal static let tca = L10n.tr("Constant", "app.acknowledgement.link.tca", fallback: "https://github.com/pointfreeco/swift-composable-architecture")
-          /// https://github.com/honkmaster/TTProgressHUD
-          internal static let ttProgressHUD = L10n.tr("Constant", "app.acknowledgement.link.ttProgressHUD", fallback: "https://github.com/honkmaster/TTProgressHUD")
+          /// https://github.com/yeatse/KingfisherWebP
+          internal static let kingfisherWebP = L10n.tr("Constant", "app.acknowledgement.link.kingfisherWebP", fallback: "https://github.com/yeatse/KingfisherWebP")
           /// https://github.com/jathu/UIImageColors
           internal static let uiImageColors = L10n.tr("Constant", "app.acknowledgement.link.uiImageColors", fallback: "https://github.com/jathu/UIImageColors")
           /// https://github.com/paololeonardi/WaterfallGrid
@@ -80,8 +80,8 @@ internal enum L10n {
           internal static let swiftyOpenCC = L10n.tr("Constant", "app.acknowledgement.text.swiftyOpenCC", fallback: "SwiftyOpenCC")
           /// The Composable Architecture
           internal static let tca = L10n.tr("Constant", "app.acknowledgement.text.tca", fallback: "The Composable Architecture")
-          /// TTProgressHUD
-          internal static let ttProgressHUD = L10n.tr("Constant", "app.acknowledgement.text.ttProgressHUD", fallback: "TTProgressHUD")
+          /// KingfisherWebP
+          internal static let kingfisherWebP = L10n.tr("Constant", "app.acknowledgement.text.kingfisherWebP", fallback: "KingfisherWebP")
           /// UIImageColors
           internal static let uiImageColors = L10n.tr("Constant", "app.acknowledgement.text.uiImageColors", fallback: "UIImageColors")
           /// WaterfallGrid
@@ -316,6 +316,11 @@ internal enum L10n {
       }
     }
     internal enum Common {
+      internal enum Button {
+        internal static let cancel = L10n.tr("Localizable", "common.button.cancel", fallback: "Cancel")
+        internal static let confirm = L10n.tr("Localizable", "common.button.confirm", fallback: "Confirm")
+        internal static let delete = L10n.tr("Localizable", "common.button.delete", fallback: "Delete")
+      }
       internal enum Value {
         /// %@ day
         internal static func day(_ p1: Any) -> String {
@@ -459,11 +464,40 @@ internal enum L10n {
         internal enum Button {
           /// Archives
           internal static let archives = L10n.tr("Localizable", "detail_view.toolbar_item.button.archives", fallback: "Archives")
+          /// Download
+          internal static let download = L10n.tr("Localizable", "detail_view.toolbar_item.button.download", fallback: "Download")
           /// Share
           internal static let share = L10n.tr("Localizable", "detail_view.toolbar_item.button.share", fallback: "Share")
           /// Torrents
           internal static let torrents = L10n.tr("Localizable", "detail_view.toolbar_item.button.torrents", fallback: "Torrents")
         }
+      }
+    }
+    internal enum DownloadsView {
+      internal enum Button {
+        internal static let move = L10n.tr("Localizable", "downloads_view.button.move", fallback: "Move")
+        internal static let pause = L10n.tr("Localizable", "downloads_view.button.pause", fallback: "Pause")
+        internal static let repair = L10n.tr("Localizable", "downloads_view.button.repair", fallback: "Repair")
+        internal static let resume = L10n.tr("Localizable", "downloads_view.button.resume", fallback: "Resume")
+        internal static let update = L10n.tr("Localizable", "downloads_view.button.update", fallback: "Update")
+      }
+      internal enum Empty {
+        internal static let downloads = L10n.tr("Localizable", "downloads_view.empty.downloads", fallback: "Downloaded galleries will appear here.")
+        internal static let filtered = L10n.tr("Localizable", "downloads_view.empty.filtered", fallback: "No downloads match the current filters.")
+      }
+      internal enum Folder {
+        internal static let all = L10n.tr("Localizable", "downloads_view.folder.all", fallback: "All Downloads")
+        internal static let name = L10n.tr("Localizable", "downloads_view.folder.name", fallback: "Folder name")
+        internal static let new = L10n.tr("Localizable", "downloads_view.folder.new", fallback: "New Folder")
+      }
+      internal enum Search {
+        internal static let prompt = L10n.tr("Localizable", "downloads_view.search.prompt", fallback: "Search downloads")
+      }
+      internal enum Title {
+        internal static let downloads = L10n.tr("Localizable", "downloads_view.title.downloads", fallback: "Downloads")
+      }
+      internal enum Toast {
+        internal static let queued = L10n.tr("Localizable", "downloads_view.toast.queued", fallback: "Download queued")
       }
     }
     internal enum EhSettingView {
@@ -1902,6 +1936,19 @@ internal enum L10n {
         internal static let success = L10n.tr("Localizable", "hud.title.success", fallback: "Success")
       }
     }
+    internal enum DateSeekView {
+      internal enum Button {
+        internal static let seekNewer = L10n.tr("Localizable", "date_seek_view.button.seek_newer", fallback: "Seek newer")
+        internal static let seekOlder = L10n.tr("Localizable", "date_seek_view.button.seek_older", fallback: "Seek older")
+      }
+      internal enum Footer {
+        internal static let seekAroundDate = L10n.tr("Localizable", "date_seek_view.footer.seek_around_date", fallback: "Seek to galleries around the selected date.")
+      }
+      internal enum Title {
+        internal static let date = L10n.tr("Localizable", "date_seek_view.title.date", fallback: "Date")
+        internal static let dateSeek = L10n.tr("Localizable", "date_seek_view.title.date_seek", fallback: "Seek to date")
+      }
+    }
     internal enum JumpPageView {
       internal enum Button {
         /// Confirm
@@ -2166,6 +2213,8 @@ internal enum L10n {
         internal static let home = L10n.tr("Localizable", "tab_item.title.home", fallback: "Home")
         /// Search
         internal static let search = L10n.tr("Localizable", "tab_item.title.search", fallback: "Search")
+        /// Downloads
+        internal static let downloads = L10n.tr("Localizable", "tab_item.title.downloads", fallback: "Downloads")
         /// Setting
         internal static let setting = L10n.tr("Localizable", "tab_item.title.setting", fallback: "Setting")
       }
@@ -2182,6 +2231,8 @@ internal enum L10n {
     }
     internal enum ToolbarItem {
       internal enum Button {
+        /// Seek to date
+        internal static let dateSeek = L10n.tr("Localizable", "toolbar_item.button.date_seek", fallback: "Seek to date")
         /// Filters
         internal static let filters = L10n.tr("Localizable", "toolbar_item.button.filters", fallback: "Filters")
         /// Jump page

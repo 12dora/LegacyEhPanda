@@ -11,6 +11,7 @@ import ComposableArchitecture
 
 struct DetailReducer: Reducer {
     enum Route: Equatable {
+        case hud
         case reading
         case archives(URL, URL)
         case torrents
@@ -45,6 +46,10 @@ struct DetailReducer: Reducer {
         var galleryTags = [GalleryTag]()
         var galleryPreviewURLs = [Int: URL]()
         var galleryComments = [GalleryComment]()
+        var previewConfig: PreviewConfig = .normal(rows: 4)
+        var hudConfig = AppToastConfig.success(
+            caption: L10n.Localizable.DownloadsView.Toast.queued
+        )
 
         var readingState = ReadingReducer.State()
         var archivesState = ArchivesReducer.State()
@@ -88,6 +93,7 @@ struct DetailReducer: Reducer {
         case syncPreviewConfig(PreviewConfig)
         case saveGalleryHistory
         case updateReadingProgress(Int)
+        case downloadGallery
 
         case teardown
         case fetchDatabaseInfos(String)
@@ -252,6 +258,18 @@ struct DetailReducer: Reducer {
                         await databaseClient.updateReadingProgress(gid: state.gallery.id, progress: progress)
                     }
 
+                case .downloadGallery:
+                    guard let detail = state.galleryDetail else { return .none }
+                    state.hudConfig = .success(caption: L10n.Localizable.DownloadsView.Toast.queued)
+                    state.route = .hud
+                    return .run { [gallery = state.gallery, previewConfig = state.previewConfig] _ in
+                        await DownloadManager.shared.start(
+                            gallery: gallery,
+                            detail: detail,
+                            previewConfig: previewConfig
+                        )
+                    }
+
                 case .teardown:
                     return teardownEffect
 
@@ -274,6 +292,9 @@ struct DetailReducer: Reducer {
                     state.galleryTags = galleryState.tags
                     state.galleryPreviewURLs = galleryState.previewURLs
                     state.galleryComments = galleryState.comments
+                    if let config = galleryState.previewConfig {
+                        state.previewConfig = config
+                    }
                     return .send(.fetchGalleryDetail)
 
                 case .fetchGalleryDetail:
@@ -310,6 +331,7 @@ struct DetailReducer: Reducer {
                             }
                         }
                         if let config = galleryState.previewConfig {
+                            state.previewConfig = config
                             effects.append(.send(.syncPreviewConfig(config)))
                         }
                         return .merge(effects)

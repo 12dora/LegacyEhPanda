@@ -11,6 +11,39 @@ import SwiftyBeaver
 typealias Logger = SwiftyBeaver
 typealias FavoritesSortOrder = EhSetting.FavoritesSortOrder
 
+enum DateSeekDirection: Equatable {
+    case newer
+    case older
+}
+
+struct DateSeekNavigation: Equatable {
+    let newerURL: URL?
+    let olderURL: URL?
+    let minimumDate: Date
+    let maximumDate: Date
+
+    var dateRange: ClosedRange<Date> {
+        minimumDate...maximumDate
+    }
+
+    func clampedDate(_ date: Date = Date()) -> Date {
+        min(max(date, minimumDate), maximumDate)
+    }
+
+    func seekURL(date: Date, direction: DateSeekDirection) -> URL? {
+        let baseURL = direction == .newer ? newerURL : olderURL
+        return baseURL?.appending(queryItems: ["seek": Self.dateFormatter.string(from: date)])
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+}
+
 protocol DateFormattable {
     var originalDate: Date { get }
 }
@@ -30,6 +63,7 @@ struct PageNumber: Equatable {
     var maximum = 0
     var lastItemTimestamp: String?
     var isNextButtonEnabled = false
+    var dateSeekNavigation: DateSeekNavigation?
 
     var isSinglePage: Bool {
         current == 0 && maximum == 0

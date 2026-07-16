@@ -112,6 +112,69 @@ struct JumpPageButton: View {
     }
 }
 
+struct DateSeekButton: View {
+    private let navigation: DateSeekNavigation?
+    private let hideText: Bool
+    private let action: () -> Void
+
+    init(navigation: DateSeekNavigation?, hideText: Bool = false, action: @escaping () -> Void) {
+        self.navigation = navigation
+        self.hideText = hideText
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "calendar")
+            if !hideText {
+                Text(L10n.Localizable.ToolbarItem.Button.dateSeek)
+            }
+        }
+        .disabled(navigation == nil)
+    }
+}
+
+struct DateSeekView: View {
+    let navigation: DateSeekNavigation
+    @Binding var selectedDate: Date
+    let seekAction: (DateSeekDirection) -> Void
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section {
+                    DatePicker(
+                        L10n.Localizable.DateSeekView.Title.date,
+                        selection: $selectedDate,
+                        in: navigation.dateRange,
+                        displayedComponents: .date
+                    )
+                    .datePickerStyle(.graphical)
+                } footer: {
+                    Text(L10n.Localizable.DateSeekView.Footer.seekAroundDate)
+                }
+                Section {
+                    Button {
+                        seekAction(.older)
+                    } label: {
+                        Label(L10n.Localizable.DateSeekView.Button.seekOlder, systemImage: "chevron.left.2")
+                    }
+                    .disabled(navigation.olderURL == nil)
+                    Button {
+                        seekAction(.newer)
+                    } label: {
+                        Label(L10n.Localizable.DateSeekView.Button.seekNewer, systemImage: "chevron.right.2")
+                    }
+                    .disabled(navigation.newerURL == nil)
+                }
+            }
+            .navigationTitle(L10n.Localizable.DateSeekView.Title.dateSeek)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .navigationViewStyle(.stack)
+    }
+}
+
 struct FavoritesIndexMenu: View {
     private let user: User
     private let index: Int

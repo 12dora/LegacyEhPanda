@@ -189,11 +189,21 @@ jobs:
           - **Commit**: ${GITHUB_SHA}
 
           ### Notes
-          iOS 16-compatible build with backported site / parser / reader fixes from newer EhPanda releases.
+          iOS 16-compatible build with selected EhPanda 3.0 features backported to the 2.7.5 codebase:
+          - Offline gallery downloads with pause, resume, repair, folders, and offline reading
+          - Date Seek navigation for Frontpage, Watched, and Favorites
+          - WebP image decoding and local reading support
+          - Lightweight native toast UI replacing TTProgressHUD
+          - Reader, parser, layout, and iPad settings fixes
           Not affiliated with the EhPanda Team.
 
           ### 说明
-          基于仍支持 iOS 16 的 EhPanda 2.7.5，回移植后续业务修复。
+          基于仍支持 iOS 16 的 EhPanda 2.7.5，移植 EhPanda 3.0 的精选功能：
+          - 画廊离线下载、暂停/续传/修复、文件夹管理与离线阅读
+          - 首页、关注与收藏的日期跳转
+          - WebP 图片解码与本地阅读支持
+          - 原生轻量提示界面，移除 TTProgressHUD
+          - 阅读器、解析、布局及 iPad 设置修复
           无签名 IPA，请使用 AltStore / SideStore / TrollStore / Sideloadly 等安装。
           EOF
           # Strip common leading indentation from the heredoc body if present

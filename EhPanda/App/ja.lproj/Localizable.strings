@@ -50,11 +50,36 @@
 "tab_item.title.favorites" = "お気に入り";
 "tab_item.title.search" = "検索";
 "tab_item.title.setting" = "設定";
+"tab_item.title.downloads" = "ダウンロード";
+"detail_view.toolbar_item.button.download" = "ダウンロード";
+"downloads_view.title.downloads" = "ダウンロード";
+"downloads_view.search.prompt" = "ダウンロードを検索";
+"downloads_view.empty.downloads" = "ダウンロードしたギャラリーがここに表示されます。";
+"downloads_view.empty.filtered" = "現在の条件に一致するダウンロードはありません。";
+"downloads_view.button.pause" = "一時停止";
+"downloads_view.button.resume" = "再開";
+"downloads_view.button.repair" = "修復";
+"downloads_view.button.update" = "更新";
+"downloads_view.button.move" = "移動";
+"downloads_view.folder.all" = "すべてのダウンロード";
+"downloads_view.folder.new" = "新規フォルダ";
+"downloads_view.folder.name" = "フォルダ名";
+"downloads_view.toast.queued" = "ダウンロード待ちに追加しました";
+"common.button.cancel" = "キャンセル";
+"common.button.confirm" = "確認";
+"common.button.delete" = "削除";
 
 // MARK: ToolbarItem
 "toolbar_item.button.filters" = "フィルター";
 "toolbar_item.button.jump_page" = "ページジャンプ";
 "toolbar_item.button.quick_search" = "クイック検索";
+"toolbar_item.button.date_seek" = "日付指定";
+
+"date_seek_view.title.date_seek" = "日付指定";
+"date_seek_view.title.date" = "日付";
+"date_seek_view.footer.seek_around_date" = "選択した日付付近のギャラリーへ移動します。";
+"date_seek_view.button.seek_newer" = "新しい方";
+"date_seek_view.button.seek_older" = "古い方";
 
 // MARK: JumpPage
 "jump_page_view.title.jump_page" = "ページジャンプ";

@@ -9,6 +9,7 @@ import SwiftUI
 import Combine
 import Foundation
 import Kingfisher
+import KingfisherWebP
 import SwiftyBeaver
 import UIImageColors
 import ComposableArchitecture
@@ -55,7 +56,14 @@ extension LibraryClient {
         initializeWebImage: {
             let config = KingfisherManager.shared.downloader.sessionConfiguration
             config.httpCookieStorage = HTTPCookieStorage.shared
+            config.httpAdditionalHeaders = [
+                "Accept": "image/webp,image/png,image/gif,image/jpeg,image/*,*/*;q=0.8"
+            ]
             KingfisherManager.shared.downloader.sessionConfiguration = config
+            KingfisherManager.shared.defaultOptions += [
+                .processor(WebPProcessor.default),
+                .cacheSerializer(WebPSerializer.default)
+            ]
         },
         clearWebImageDiskCache: {
             KingfisherManager.shared.cache.clearDiskCache()

@@ -323,6 +323,19 @@ struct MoreFavoritesGalleriesRequest: Request {
     }
 }
 
+struct DateSeekGalleriesRequest: Request {
+    let url: URL
+
+    var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
+        URLSession.shared.dataTaskPublisher(for: url)
+            .genericRetry()
+            .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
+            .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
+            .mapError(mapAppError)
+            .eraseToAnyPublisher()
+    }
+}
+
 struct ToplistsGalleriesRequest: Request {
     let catIndex: Int
     var pageNum: Int?

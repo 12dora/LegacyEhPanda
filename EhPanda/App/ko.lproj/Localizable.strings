@@ -50,11 +50,36 @@
 "tab_item.title.favorites" = "즐겨찾기";
 "tab_item.title.search" = "검색";
 "tab_item.title.setting" = "설정";
+"tab_item.title.downloads" = "다운로드";
+"detail_view.toolbar_item.button.download" = "다운로드";
+"downloads_view.title.downloads" = "다운로드";
+"downloads_view.search.prompt" = "다운로드 검색";
+"downloads_view.empty.downloads" = "다운로드한 갤러리가 여기에 표시됩니다.";
+"downloads_view.empty.filtered" = "현재 필터와 일치하는 다운로드가 없습니다.";
+"downloads_view.button.pause" = "일시 정지";
+"downloads_view.button.resume" = "계속";
+"downloads_view.button.repair" = "복구";
+"downloads_view.button.update" = "업데이트";
+"downloads_view.button.move" = "이동";
+"downloads_view.folder.all" = "모든 다운로드";
+"downloads_view.folder.new" = "새 폴더";
+"downloads_view.folder.name" = "폴더 이름";
+"downloads_view.toast.queued" = "다운로드 대기열에 추가됨";
+"common.button.cancel" = "취소";
+"common.button.confirm" = "확인";
+"common.button.delete" = "삭제";
 
 // MARK: ToolbarItem
 "toolbar_item.button.filters" = "필터";
 "toolbar_item.button.jump_page" = "페이지 이동";
 "toolbar_item.button.quick_search" = "빠른 검색";
+"toolbar_item.button.date_seek" = "날짜로 이동";
+
+"date_seek_view.title.date_seek" = "날짜로 이동";
+"date_seek_view.title.date" = "날짜";
+"date_seek_view.footer.seek_around_date" = "선택한 날짜 근처의 갤러리로 이동합니다.";
+"date_seek_view.button.seek_newer" = "새로운 쪽";
+"date_seek_view.button.seek_older" = "오래된 쪽";
 
 // MARK: JumpPage
 "jump_page_view.title.jump_page" = "페이지 이동";

@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import TTProgressHUD
 import ComposableArchitecture
 
 struct ArchivesReducer: Reducer {
@@ -26,8 +25,8 @@ struct ArchivesReducer: Reducer {
         var loadingState: LoadingState = .idle
         var hathArchives = [GalleryArchive.HathArchive]()
 
-        var messageHUDConfig = TTProgressHUDConfig()
-        var communicatingHUDConfig: TTProgressHUDConfig = .communicating
+        var messageHUDConfig = AppToastConfig()
+        var communicatingHUDConfig: AppToastConfig = .communicating
     }
 
     enum Action: BindableAction {

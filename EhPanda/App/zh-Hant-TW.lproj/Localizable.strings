@@ -50,11 +50,36 @@
 "tab_item.title.favorites" = "收藏";
 "tab_item.title.search" = "搜尋";
 "tab_item.title.setting" = "設定";
+"tab_item.title.downloads" = "下載";
+"detail_view.toolbar_item.button.download" = "下載";
+"downloads_view.title.downloads" = "下載";
+"downloads_view.search.prompt" = "搜尋下載";
+"downloads_view.empty.downloads" = "已下載的畫廊會顯示在這裡。";
+"downloads_view.empty.filtered" = "沒有下載項目符合目前的篩選條件。";
+"downloads_view.button.pause" = "暫停";
+"downloads_view.button.resume" = "繼續";
+"downloads_view.button.repair" = "修復";
+"downloads_view.button.update" = "更新";
+"downloads_view.button.move" = "移動";
+"downloads_view.folder.all" = "全部下載";
+"downloads_view.folder.new" = "新增資料夾";
+"downloads_view.folder.name" = "資料夾名稱";
+"downloads_view.toast.queued" = "已加入下載佇列";
+"common.button.cancel" = "取消";
+"common.button.confirm" = "確認";
+"common.button.delete" = "刪除";
 
 // MARK: ToolbarItem
 "toolbar_item.button.filters" = "過濾";
 "toolbar_item.button.jump_page" = "跳到...";
 "toolbar_item.button.quick_search" = "快速搜尋";
+"toolbar_item.button.date_seek" = "日期定位";
+
+"date_seek_view.title.date_seek" = "日期定位";
+"date_seek_view.title.date" = "日期";
+"date_seek_view.footer.seek_around_date" = "前往所選日期附近的畫廊。";
+"date_seek_view.button.seek_newer" = "較新";
+"date_seek_view.button.seek_older" = "較舊";
 
 // MARK: JumpPage
 "jump_page_view.title.jump_page" = "跳到...";

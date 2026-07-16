@@ -61,6 +61,17 @@ struct FrontpageView: View {
             FiltersView(store: store.scope(state: \.filtersState, action: FrontpageReducer.Action.filters))
                 .autoBlur(radius: blurRadius).environment(\.inSheet, true)
         }
+        .sheet(isPresented: viewStore.$dateSeekPresented) {
+            if let navigation = viewStore.pageNumber.dateSeekNavigation {
+                DateSeekView(
+                    navigation: navigation,
+                    selectedDate: viewStore.$dateSeekDate,
+                    seekAction: { viewStore.send(.performDateSeek($0)) }
+                )
+                .accentColor(setting.accentColor)
+                .autoBlur(radius: blurRadius)
+            }
+        }
         .searchable(text: viewStore.$keyword, prompt: L10n.Localizable.Searchable.Prompt.filter)
         .onAppear {
             if viewStore.galleries.isEmpty {
@@ -87,6 +98,12 @@ struct FrontpageView: View {
     }
     private func toolbar() -> some ToolbarContent {
         CustomToolbarItem {
+            DateSeekButton(
+                navigation: viewStore.pageNumber.dateSeekNavigation,
+                hideText: true
+            ) {
+                viewStore.send(.presentDateSeek)
+            }
             FiltersButton(hideText: true) {
                 viewStore.send(.setNavigation(.filters))
             }

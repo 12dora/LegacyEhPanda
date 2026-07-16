@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import TTProgressHUD
 import ComposableArchitecture
 
 struct TorrentsReducer: Reducer {
@@ -23,7 +22,7 @@ struct TorrentsReducer: Reducer {
         @BindingState var route: Route?
         var torrents = [GalleryTorrent]()
         var loadingState: LoadingState = .idle
-        var hudConfig: TTProgressHUDConfig = .copiedToClipboardSucceeded
+        var hudConfig: AppToastConfig = .copiedToClipboardSucceeded
     }
 
     enum Action: BindableAction, Equatable {

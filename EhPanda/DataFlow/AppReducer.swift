@@ -133,6 +133,8 @@ struct AppReducer: Reducer {
                             } else {
                                 effects.append(.send(.searchRoot(.fetchDatabaseInfos)))
                             }
+                        case .downloads:
+                            break
                         case .setting:
                             if state.settingState.route != nil {
                                 effects.append(.send(.setting(.setNavigation(nil))))
@@ -142,9 +144,6 @@ struct AppReducer: Reducer {
                         if [.home, .search].contains(type) {
                             effects.append(hapticEffect)
                         }
-                    }
-                    if type == .setting && deviceClient.isPad() {
-                        effects.append(.send(.appRoute(.setNavigation(.setting))))
                     }
                     return effects.isEmpty ? .none : .merge(effects)
 
