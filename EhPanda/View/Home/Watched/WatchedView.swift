@@ -76,6 +76,17 @@ struct WatchedView: View {
             FiltersView(store: store.scope(state: \.filtersState, action: WatchedReducer.Action.filters))
                 .autoBlur(radius: blurRadius).environment(\.inSheet, true)
         }
+        .sheet(isPresented: viewStore.$dateSeekPresented) {
+            if let navigation = viewStore.pageNumber.dateSeekNavigation {
+                DateSeekView(
+                    navigation: navigation,
+                    selectedDate: viewStore.$dateSeekDate,
+                    seekAction: { viewStore.send(.performDateSeek($0)) }
+                )
+                .accentColor(setting.accentColor)
+                .autoBlur(radius: blurRadius)
+            }
+        }
         .searchable(text: viewStore.$keyword)
         .searchSuggestions {
             TagSuggestionView(
@@ -112,6 +123,9 @@ struct WatchedView: View {
     private func toolbar() -> some ToolbarContent {
         CustomToolbarItem {
             ToolbarFeaturesMenu {
+                DateSeekButton(navigation: viewStore.pageNumber.dateSeekNavigation) {
+                    viewStore.send(.presentDateSeek)
+                }
                 FiltersButton {
                     viewStore.send(.setNavigation(.filters))
                 }

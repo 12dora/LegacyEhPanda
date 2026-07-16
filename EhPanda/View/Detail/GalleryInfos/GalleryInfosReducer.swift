@@ -5,7 +5,6 @@
 //  Created by 荒木辰造 on R 4/01/23.
 //
 
-import TTProgressHUD
 import ComposableArchitecture
 
 struct GalleryInfosReducer: Reducer {
@@ -15,7 +14,7 @@ struct GalleryInfosReducer: Reducer {
 
     struct State: Equatable {
         @BindingState var route: Route?
-        var hudConfig: TTProgressHUDConfig = .copiedToClipboardSucceeded
+        var hudConfig: AppToastConfig = .copiedToClipboardSucceeded
     }
 
     enum Action: BindableAction, Equatable {

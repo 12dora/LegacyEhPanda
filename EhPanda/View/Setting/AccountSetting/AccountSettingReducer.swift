@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import TTProgressHUD
 import ComposableArchitecture
 
 struct AccountSettingReducer: Reducer {
@@ -22,7 +21,7 @@ struct AccountSettingReducer: Reducer {
         @BindingState var route: Route?
         @BindingState var ehCookiesState: CookiesState = .empty(.ehentai)
         @BindingState var exCookiesState: CookiesState = .empty(.exhentai)
-        var hudConfig: TTProgressHUDConfig = .copiedToClipboardSucceeded
+        var hudConfig: AppToastConfig = .copiedToClipboardSucceeded
 
         var loginState = LoginReducer.State()
         var ehSettingState = EhSettingReducer.State()

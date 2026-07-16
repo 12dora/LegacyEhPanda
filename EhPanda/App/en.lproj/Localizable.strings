@@ -50,11 +50,38 @@
 "tab_item.title.favorites" = "Favorites";
 "tab_item.title.search" = "Search";
 "tab_item.title.setting" = "Setting";
+"tab_item.title.downloads" = "Downloads";
+
+"detail_view.toolbar_item.button.download" = "Download";
+
+"downloads_view.title.downloads" = "Downloads";
+"downloads_view.search.prompt" = "Search downloads";
+"downloads_view.empty.downloads" = "Downloaded galleries will appear here.";
+"downloads_view.empty.filtered" = "No downloads match the current filters.";
+"downloads_view.button.pause" = "Pause";
+"downloads_view.button.resume" = "Resume";
+"downloads_view.button.repair" = "Repair";
+"downloads_view.button.update" = "Update";
+"downloads_view.button.move" = "Move";
+"downloads_view.folder.all" = "All Downloads";
+"downloads_view.folder.new" = "New Folder";
+"downloads_view.folder.name" = "Folder name";
+"downloads_view.toast.queued" = "Download queued";
+"common.button.cancel" = "Cancel";
+"common.button.confirm" = "Confirm";
+"common.button.delete" = "Delete";
 
 // MARK: ToolbarItem
 "toolbar_item.button.filters" = "Filters";
 "toolbar_item.button.jump_page" = "Jump page";
 "toolbar_item.button.quick_search" = "Quick search";
+"toolbar_item.button.date_seek" = "Seek to date";
+
+"date_seek_view.title.date_seek" = "Seek to date";
+"date_seek_view.title.date" = "Date";
+"date_seek_view.footer.seek_around_date" = "Seek to galleries around the selected date.";
+"date_seek_view.button.seek_newer" = "Newer";
+"date_seek_view.button.seek_older" = "Older";
 
 // MARK: JumpPage
 "jump_page_view.title.jump_page" = "Jump page";

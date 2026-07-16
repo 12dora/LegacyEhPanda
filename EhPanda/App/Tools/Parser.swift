@@ -1435,9 +1435,16 @@ extension Parser {
                     break
                 }
 
-                return PageNumber(lastItemTimestamp: timestamp, isNextButtonEnabled: isEnabled)
+                return PageNumber(
+                    lastItemTimestamp: timestamp,
+                    isNextButtonEnabled: isEnabled,
+                    dateSeekNavigation: parseDateSeekNavigation(doc: doc)
+                )
             } else {
-                return PageNumber(isNextButtonEnabled: false)
+                return PageNumber(
+                    isNextButtonEnabled: false,
+                    dateSeekNavigation: parseDateSeekNavigation(doc: doc)
+                )
             }
         }
 
@@ -1451,7 +1458,77 @@ extension Parser {
                 maximum = num - 1
             }
         }
-        return PageNumber(current: current, maximum: maximum)
+        return PageNumber(
+            current: current,
+            maximum: maximum,
+            dateSeekNavigation: parseDateSeekNavigation(doc: doc)
+        )
+    }
+
+    private static func parseScriptVariable(name: String, doc: HTMLDocument) -> String? {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        let pattern = #"var\s+\#(escapedName)\s*=\s*[\"']([^\"']*)[\"']\s*;"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+
+        for script in doc.xpath("//script") {
+            guard let text = script.text else { continue }
+            let range = NSRange(text.startIndex..., in: text)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  let valueRange = Range(match.range(at: 1), in: text)
+            else { continue }
+            return String(text[valueRange])
+        }
+        return nil
+    }
+
+    private static func parseScriptURL(name: String, doc: HTMLDocument) -> URL? {
+        guard var value = parseScriptVariable(name: name, doc: doc)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty
+        else { return nil }
+
+        value = value
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "\\u0026", with: "&")
+        let baseURL = Defaults.URL.host
+        let parsedURL: URL?
+        if let url = URL(string: value), url.scheme != nil {
+            parsedURL = url
+        } else {
+            parsedURL = URL(string: value, relativeTo: baseURL)?.absoluteURL
+        }
+        guard let parsedURL,
+              var components = URLComponents(url: parsedURL, resolvingAgainstBaseURL: false)
+        else { return parsedURL }
+
+        let knownHosts = [
+            Defaults.URL.ehentai.host,
+            Defaults.URL.exhentai.host,
+            Defaults.URL.sexhentai.host
+        ].compactMap { $0?.lowercased() }
+        if let host = components.host?.lowercased(), knownHosts.contains(host),
+           let baseComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) {
+            components.scheme = baseComponents.scheme
+            components.host = baseComponents.host
+        }
+        return components.url
+    }
+
+    private static func parseDateSeekNavigation(doc: HTMLDocument) -> DateSeekNavigation? {
+        guard let minimumValue = parseScriptVariable(name: "mindate", doc: doc),
+              let maximumValue = parseScriptVariable(name: "maxdate", doc: doc),
+              let minimumDate = try? parseDate(time: minimumValue, format: "yyyy-MM-dd"),
+              let maximumDate = try? parseDate(time: maximumValue, format: "yyyy-MM-dd")
+        else { return nil }
+
+        let newerURL = parseScriptURL(name: "prevurl", doc: doc)
+        let olderURL = parseScriptURL(name: "nexturl", doc: doc)
+        guard newerURL != nil || olderURL != nil else { return nil }
+        return .init(
+            newerURL: newerURL,
+            olderURL: olderURL,
+            minimumDate: minimumDate,
+            maximumDate: maximumDate
+        )
     }
 
     // MARK: SortOrder

@@ -184,6 +184,11 @@ struct DetailView: View {
         .animation(.default, value: viewStore.showsUserRating)
         .animation(.default, value: viewStore.showsFullTitle)
         .animation(.default, value: viewStore.galleryDetail)
+        .progressHUD(
+            config: viewStore.hudConfig,
+            unwrapping: viewStore.$route,
+            case: /DetailReducer.Route.hud
+        )
         .onAppear {
             DispatchQueue.main.async {
                 viewStore.send(.onAppear(gid, setting.showsNewDawnGreeting))
@@ -236,6 +241,14 @@ private extension DetailView {
     func toolbar() -> some ToolbarContent {
         CustomToolbarItem {
             ToolbarFeaturesMenu {
+                Button {
+                    viewStore.send(.downloadGallery)
+                } label: {
+                    Label(
+                        L10n.Localizable.DetailView.ToolbarItem.Button.download,
+                        systemImage: "arrow.down.circle"
+                    )
+                }
                 Button {
                     if let galleryURL = viewStore.gallery.galleryURL,
                        let archiveURL = viewStore.galleryDetail?.archiveURL

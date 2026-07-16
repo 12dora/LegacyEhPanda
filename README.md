@@ -28,6 +28,9 @@ Upstream 2.7.5 was the last line that still ran on iOS 16. Later releases fixed 
 - Search, favorites, history, filters
 - Gallery detail, comments, torrents / archive entry points
 - Reader with zoom / vertical & horizontal modes
+- Persistent offline gallery downloads with folders, pause/resume, repair and update
+- Date Seek on Frontpage, Watched and Favorites
+- WebP image decoding
 - Host settings (uConfig) adapted to current site form fields
 - Optional domain fronting / related network options from upstream 2.7.5
 
@@ -88,6 +91,10 @@ Signing: this fork is typically distributed **unsigned**, like many AltStore com
 
 From post-2.7.5 upstream (non-exhaustive):
 
+- EhPanda 3.0 offline downloads, adapted to iOS 16 background `URLSession` transfers and the 2.7.5 reader
+- Date Seek on Frontpage, Watched and Favorites, including all eight bundled localizations
+- WebP decoding through a Kingfisher 7-compatible codec pinned below the Kingfisher 8 / newer-OS boundary
+- Bottom material toasts as the iOS 16 fallback for the 3.0 glass toast presentation
 - Gallery preview parsing for current `gt100` / `gt200` layouts  
 - EhSetting / thumbnail size / cover scale / page labeling adaptations  
 - Thumbnail loading & preview batch behaviour fixes  
@@ -167,6 +174,10 @@ Content shown in the app comes from E-Hentai / ExHentai and is user-generated. *
 
 ## 主要回移植内容（摘要）
 
+- 3.0 离线下载：文件夹、暂停/继续、修复/更新、后台传输与离线阅读
+- 首页、订阅与收藏列表的日期定位（Date Seek）
+- WebP 图片解码
+- 使用 iOS 16 材质效果实现的底部状态提示
 - 当前站点缩略图 / 预览（含 `gt100` / `gt200`）解析  
 - EhSetting、封面缩放、缩略图尺寸与行数等表单项适配  
 - 阅读页手势与滚动（使用 iOS 16 可用 API）  

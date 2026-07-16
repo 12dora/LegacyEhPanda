@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import TTProgressHUD
 import SwiftUINavigation
 
 extension NavigationLink {
@@ -85,16 +84,13 @@ extension View {
     }
 
     func progressHUD<Enum: Equatable, Case>(
-        config: TTProgressHUDConfig,
+        config: AppToastConfig,
         unwrapping enum: Binding<Enum?>,
         case casePath: AnyCasePath<Enum, Case>
     ) -> some View {
         ZStack {
             self
-            TTProgressHUD(
-                `enum`.case(casePath).isRemovedDuplicatesPresent(),
-                config: config
-            )
+            AppToast(isPresented: `enum`.case(casePath).isRemovedDuplicatesPresent(), config: config)
         }
     }
 }

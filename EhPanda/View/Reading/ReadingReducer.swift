@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import TTProgressHUD
 import ComposableArchitecture
 
 struct ReadingReducer: Reducer {
@@ -50,10 +49,11 @@ struct ReadingReducer: Reducer {
         @BindingState var route: Route?
         var gallery: Gallery = .empty
         var galleryDetail: GalleryDetail?
+        var isOffline = false
 
         var readingProgress: Int = .zero
         var forceRefreshID: UUID = .init()
-        var hudConfig: TTProgressHUDConfig = .loading
+        var hudConfig: AppToastConfig = .loading
 
         var webImageLoadSuccessIndices = Set<Int>()
         var imageURLLoadingStates = [Int: LoadingState]()
@@ -217,9 +217,7 @@ struct ReadingReducer: Reducer {
                 return .run(operation: { _ in hapticsClient.generateFeedback(.light) })
 
             case .onAppear(let gid, let enablesLandscape):
-                var effects: [Effect<Action>] = [
-                    .send(.fetchDatabaseInfos(gid))
-                ]
+                var effects: [Effect<Action>] = state.isOffline ? [] : [.send(.fetchDatabaseInfos(gid))]
                 if enablesLandscape {
                     effects.append(.send(.setOrientationPortrait(false)))
                 }
@@ -239,6 +237,7 @@ struct ReadingReducer: Reducer {
                 return .none
 
             case .reloadAllWebImages:
+                guard !state.isOffline else { return .none }
                 state.previewURLs = .init()
                 state.thumbnailURLs = .init()
                 state.imageURLs = .init()
@@ -265,17 +264,17 @@ struct ReadingReducer: Reducer {
                 return .none
 
             case .copyImage(let imageURL):
-                return .send(.fetchImage(.copy(imageURL.isGIF), imageURL))
+                return .send(.fetchImage(.copy(imageURL.isAnimatedImage), imageURL))
 
             case .saveImage(let imageURL):
-                return .send(.fetchImage(.save(imageURL.isGIF), imageURL))
+                return .send(.fetchImage(.save(imageURL.isAnimatedImage), imageURL))
 
             case .saveImageDone(let isSucceeded):
                 state.hudConfig = isSucceeded ? .savedToPhotoLibrary : .error
                 return .send(.setNavigation(.hud))
 
             case .shareImage(let imageURL):
-                return .send(.fetchImage(.share(imageURL.isGIF), imageURL))
+                return .send(.fetchImage(.share(imageURL.isAnimatedImage), imageURL))
 
             case .fetchImage(let action, let imageURL):
                 return .run { send in
@@ -393,6 +392,7 @@ struct ReadingReducer: Reducer {
                 return .none
 
             case .fetchImageURLs(let index):
+                guard !state.isOffline else { return .none }
                 if state.mpvKey != nil {
                     return .send(.fetchMPVImageURL(index, false))
                 } else {
@@ -400,6 +400,7 @@ struct ReadingReducer: Reducer {
                 }
 
             case .refetchImageURLs(let index):
+                guard !state.isOffline else { return .none }
                 if state.mpvKey != nil {
                     return .send(.fetchMPVImageURL(index, true))
                 } else {
@@ -643,5 +644,19 @@ struct ReadingReducer: Reducer {
             case: /Route.share,
             hapticsClient: hapticsClient
         )
+    }
+}
+
+extension ReadingReducer.State {
+    static func offline(download: GalleryDownload, imageURLs: [Int: URL]) -> Self {
+        var state = Self()
+        state.gallery = download.gallery
+        state.galleryDetail = download.detail
+        state.previewConfig = download.previewConfig
+        state.imageURLs = imageURLs
+        state.originalImageURLs = imageURLs
+        state.databaseLoadingState = .idle
+        state.isOffline = true
+        return state
     }
 }

@@ -73,4 +73,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         return true
     }
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        Task { @MainActor in
+            DownloadManager.shared.handleEventsForBackgroundSession(
+                identifier: identifier,
+                completionHandler: completionHandler
+            )
+        }
+    }
 }

@@ -56,8 +56,13 @@ extension Float {
 extension URL {
     static let mock = Defaults.URL.ehentai
 
-    var isGIF: Bool {
-        pathExtension == "gif"
+    var isAnimatedImage: Bool {
+        switch pathExtension.lowercased() {
+        case "gif", "webp":
+            return true
+        default:
+            return false
+        }
     }
 
     func appending(queryItems: [URLQueryItem]) -> URL {

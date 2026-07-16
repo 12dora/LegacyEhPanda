@@ -6,6 +6,7 @@
 //
 
 import ComposableArchitecture
+import Foundation
 
 struct WatchedReducer: Reducer {
     enum Route: Equatable {
@@ -15,12 +16,14 @@ struct WatchedReducer: Reducer {
     }
 
     private enum CancelID: CaseIterable {
-        case fetchGalleries, fetchMoreGalleries
+        case fetchGalleries, fetchMoreGalleries, fetchDateSeekGalleries
     }
 
     struct State: Equatable {
         @BindingState var route: Route?
         @BindingState var keyword = ""
+        @BindingState var dateSeekPresented = false
+        @BindingState var dateSeekDate = Date()
 
         var galleries = [Gallery]()
         var pageNumber = PageNumber()
@@ -55,6 +58,9 @@ struct WatchedReducer: Reducer {
         case fetchGalleriesDone(Result<(PageNumber, [Gallery]), AppError>)
         case fetchMoreGalleries
         case fetchMoreGalleriesDone(Result<(PageNumber, [Gallery]), AppError>)
+        case presentDateSeek
+        case performDateSeek(DateSeekDirection)
+        case performDateSeekDone(Result<(PageNumber, [Gallery]), AppError>)
 
         case filters(FiltersReducer.Action)
         case detail(DetailReducer.Action)
@@ -163,6 +169,45 @@ struct WatchedReducer: Reducer {
                     state.footerLoadingState = .failed(error)
                 }
                 return .none
+
+            case .presentDateSeek:
+                guard let navigation = state.pageNumber.dateSeekNavigation else { return .none }
+                state.dateSeekDate = navigation.clampedDate(state.dateSeekDate)
+                state.dateSeekPresented = true
+                return .run(operation: { _ in hapticsClient.generateFeedback(.light) })
+
+            case .performDateSeek(let direction):
+                guard state.loadingState != .loading,
+                      let url = state.pageNumber.dateSeekNavigation?
+                        .seekURL(date: state.dateSeekDate, direction: direction)
+                else { return .none }
+                state.dateSeekPresented = false
+                state.loadingState = .loading
+                state.footerLoadingState = .idle
+                state.pageNumber.resetPages()
+                return .run { send in
+                    await send(.performDateSeekDone(await DateSeekGalleriesRequest(url: url).response()))
+                }
+                .cancellable(id: CancelID.fetchDateSeekGalleries)
+
+            case .performDateSeekDone(let result):
+                state.loadingState = .idle
+                switch result {
+                case .success(let (pageNumber, galleries)):
+                    guard !galleries.isEmpty else {
+                        state.loadingState = .failed(.notFound)
+                        return .none
+                    }
+                    state.pageNumber = pageNumber
+                    state.galleries = galleries
+                    if let navigation = pageNumber.dateSeekNavigation {
+                        state.dateSeekDate = navigation.clampedDate(state.dateSeekDate)
+                    }
+                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                case .failure(let error):
+                    state.loadingState = .failed(error)
+                    return .none
+                }
 
             case .quickSearch:
                 return .none

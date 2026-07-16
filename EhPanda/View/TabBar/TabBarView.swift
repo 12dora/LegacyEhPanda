@@ -24,7 +24,13 @@ struct TabBarView: View {
             TabView(
                 selection: .init(
                     get: { viewStore.tabBarState.tabBarItemType },
-                    set: { viewStore.send(.tabBar(.setTabBarItemType($0))) }
+                    set: { tab in
+                        if tab == .setting, DeviceUtil.isPad {
+                            viewStore.send(.appRoute(.setNavigation(.setting)))
+                        } else {
+                            viewStore.send(.tabBar(.setTabBarItemType(tab)))
+                        }
+                    }
                 )
             ) {
                 ForEach(TabBarItemType.allCases) { type in
@@ -53,6 +59,11 @@ struct TabBarView: View {
                                 setting: viewStore.$settingState.setting,
                                 blurRadius: viewStore.appLockState.blurRadius,
                                 tagTranslator: viewStore.settingState.tagTranslator
+                            )
+                        case .downloads:
+                            DownloadsView(
+                                setting: viewStore.$settingState.setting,
+                                blurRadius: viewStore.appLockState.blurRadius
                             )
                         case .setting:
                             SettingView(
@@ -120,6 +131,7 @@ enum TabBarItemType: Int, CaseIterable, Identifiable {
     case home
     case favorites
     case search
+    case downloads
     case setting
 }
 
@@ -132,6 +144,8 @@ extension TabBarItemType {
             return L10n.Localizable.TabItem.Title.favorites
         case .search:
             return L10n.Localizable.TabItem.Title.search
+        case .downloads:
+            return L10n.Localizable.TabItem.Title.downloads
         case .setting:
             return L10n.Localizable.TabItem.Title.setting
         }
@@ -144,6 +158,8 @@ extension TabBarItemType {
             return .heartCircle
         case .search:
             return .magnifyingglassCircle
+        case .downloads:
+            return .arrowDownCircle
         case .setting:
             return .gearshapeCircle
         }
