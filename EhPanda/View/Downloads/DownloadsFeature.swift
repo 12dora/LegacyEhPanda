@@ -606,18 +606,12 @@ struct DownloadsView: View {
         }
         .navigationViewStyle(.stack)
         .fullScreenCover(item: $selectedDownload) { download in
-            let urls = manager.localPageURLs(for: download)
-            ReadingView(
-                store: Store(
-                    initialState: ReadingReducer.State.offline(download: download, imageURLs: urls),
-                    reducer: ReadingReducer.init
-                ),
-                gid: download.gid,
+            OfflineReadingContainer(
+                download: download,
+                imageURLs: manager.localPageURLs(for: download),
                 setting: $setting,
                 blurRadius: blurRadius
             )
-            .accentColor(setting.accentColor)
-            .autoBlur(radius: blurRadius)
         }
         .alert(L10n.Localizable.DownloadsView.Folder.new, isPresented: $showsNewFolderAlert) {
             TextField(L10n.Localizable.DownloadsView.Folder.name, text: $newFolderName)
@@ -681,6 +675,45 @@ struct DownloadsView: View {
         }
         Button(role: .destructive) { manager.delete(gid: item.gid) } label: {
             Label(L10n.Localizable.Common.Button.delete, systemImage: "trash")
+        }
+    }
+}
+
+// fullScreenCover re-evaluates its content whenever the downloads list changes (e.g.
+// another download makes progress); the reader's store must survive those
+// re-evaluations or reading state resets mid-session.
+private struct OfflineReadingContainer: View {
+    @StateObject private var storeHolder: StoreHolder
+    private let gid: String
+    @Binding private var setting: Setting
+    private let blurRadius: Double
+
+    init(download: GalleryDownload, imageURLs: [Int: URL], setting: Binding<Setting>, blurRadius: Double) {
+        _storeHolder = StateObject(wrappedValue: StoreHolder(download: download, imageURLs: imageURLs))
+        gid = download.gid
+        _setting = setting
+        self.blurRadius = blurRadius
+    }
+
+    var body: some View {
+        ReadingView(
+            store: storeHolder.store,
+            gid: gid,
+            setting: $setting,
+            blurRadius: blurRadius
+        )
+        .accentColor(setting.accentColor)
+        .autoBlur(radius: blurRadius)
+    }
+
+    private final class StoreHolder: ObservableObject {
+        let store: StoreOf<ReadingReducer>
+
+        init(download: GalleryDownload, imageURLs: [Int: URL]) {
+            store = Store(
+                initialState: ReadingReducer.State.offline(download: download, imageURLs: imageURLs),
+                reducer: ReadingReducer.init
+            )
         }
     }
 }
