@@ -183,6 +183,7 @@ struct ReadingReducer: Reducer {
         case teardown
         case fetchDatabaseInfos(String)
         case fetchDatabaseInfosDone(GalleryState)
+        case fetchOfflineReadingProgressDone(Int)
 
         case fetchPreviewURLs(Int)
         case fetchPreviewURLsDone(Int, Result<[Int: URL], AppError>)
@@ -249,7 +250,17 @@ struct ReadingReducer: Reducer {
                 return .run(operation: { _ in hapticsClient.generateFeedback(.light) })
 
             case .onAppear(let gid, let enablesLandscape):
-                var effects: [Effect<Action>] = state.isOffline ? [] : [.send(.fetchDatabaseInfos(gid))]
+                var effects: [Effect<Action>] = state.isOffline
+                    ? [
+                        // Offline state carries local image URLs but the reading
+                        // progress still lives in the shared database.
+                        .run { [gid = state.gallery.id] send in
+                            let progress = await databaseClient
+                                .fetchGalleryState(gid: gid)?.readingProgress ?? 0
+                            await send(.fetchOfflineReadingProgressDone(progress))
+                        }
+                    ]
+                    : [.send(.fetchDatabaseInfos(gid))]
                 if enablesLandscape {
                     effects.append(.send(.setOrientationPortrait(false)))
                 }
@@ -422,6 +433,13 @@ struct ReadingReducer: Reducer {
                 state.thumbnailURLs = galleryState.thumbnailURLs
                 state.originalImageURLs =  galleryState.originalImageURLs
                 state.readingProgress = galleryState.readingProgress
+                state.databaseLoadingState = .idle
+                return .none
+
+            case .fetchOfflineReadingProgressDone(let progress):
+                if progress > 0 {
+                    state.readingProgress = progress
+                }
                 state.databaseLoadingState = .idle
                 return .none
 
@@ -892,7 +910,9 @@ extension ReadingReducer.State {
         state.previewConfig = download.previewConfig
         state.imageURLs = imageURLs
         state.originalImageURLs = imageURLs
-        state.databaseLoadingState = .idle
+        // Stays .loading until the stored reading progress arrives in
+        // fetchOfflineReadingProgressDone, so the page is initialized once, correctly.
+        state.databaseLoadingState = .loading
         state.isOffline = true
         return state
     }
