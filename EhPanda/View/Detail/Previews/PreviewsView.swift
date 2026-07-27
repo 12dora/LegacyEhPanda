@@ -37,38 +37,75 @@ struct PreviewsView: View {
         )]
     }
 
+    private var databaseError: AppError? {
+        guard case .failed(let error) = viewStore.databaseLoadingState else { return nil }
+        return error
+    }
+    private func previewLoadingState(at index: Int) -> LoadingState {
+        viewStore.previewLoadingStates[index] ?? .idle
+    }
+    private func previewFailed(at index: Int) -> Bool {
+        guard viewStore.previewURLs[index] == nil,
+              case .failed = previewLoadingState(at: index)
+        else { return false }
+        return true
+    }
+    private func fetchPreviewURLsIfNeeded(at index: Int) {
+        // Driven by the missing page, not by a batch boundary that a scroll may skip.
+        guard viewStore.databaseLoadingState != .loading,
+              viewStore.previewURLs[index] == nil
+        else { return }
+        if case .failed = previewLoadingState(at: index) { return }
+        viewStore.send(.fetchPreviewURLs(index))
+    }
+
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: gridItems) {
-                ForEach(1..<viewStore.gallery.pageCount + 1, id: \.self) { index in
-                    VStack {
-                        let (url, modifier) = PreviewResolver.getPreviewConfigs(
-                            originalURL: viewStore.previewURLs[index]
-                        )
-                        Button {
-                            viewStore.send(.updateReadingProgress(index))
-                            viewStore.send(.setNavigation(.reading))
-                        } label: {
-                            KFImage.url(url, cacheKey: viewStore.previewURLs[index]?.absoluteString)
-                                .placeholder { Placeholder(style: .activity(ratio: Defaults.ImageSize.previewAspect)) }
-                                .imageModifier(modifier).fade(duration: 0.25).resizable().scaledToFit()
+        ZStack {
+            ScrollView {
+                LazyVGrid(columns: gridItems) {
+                    ForEach(1..<viewStore.gallery.pageCount + 1, id: \.self) { index in
+                        VStack {
+                            let (url, modifier) = PreviewResolver.getPreviewConfigs(
+                                originalURL: viewStore.previewURLs[index]
+                            )
+                            ZStack {
+                                Button {
+                                    viewStore.send(.navigateReading(index))
+                                } label: {
+                                    KFImage.url(url, cacheKey: viewStore.previewURLs[index]?.absoluteString)
+                                        .placeholder {
+                                            Placeholder(style: .activity(ratio: Defaults.ImageSize.previewAspect))
+                                        }
+                                        .imageModifier(modifier).fade(duration: 0.25).resizable().scaledToFit()
+                                }
+                                // A failed batch used to stay a silent placeholder forever.
+                                if previewFailed(at: index) {
+                                    Button {
+                                        viewStore.send(.fetchPreviewURLs(index))
+                                    } label: {
+                                        Image(systemSymbol: .exclamationmarkArrowTriangle2Circlepath)
+                                            .foregroundStyle(.red).imageScale(.large)
+                                    }
+                                }
+                            }
+                            Text("\(index)").font(DeviceUtil.isPadWidth ? .callout : .caption)
+                                .foregroundColor(.secondary)
                         }
-                        Text("\(index)").font(DeviceUtil.isPadWidth ? .callout : .caption).foregroundColor(.secondary)
-                    }
-                    .onAppear {
-                        let batchSize = max(viewStore.previewConfig.batchSize, 1)
-                        if viewStore.databaseLoadingState != .loading
-                            && viewStore.previewURLs[index] == nil
-                            && (index - 1) % batchSize == 0
-                        {
-                            viewStore.send(.fetchPreviewURLs(index))
+                        .onAppear {
+                            fetchPreviewURLsIfNeeded(at: index)
                         }
                     }
                 }
+                .padding(.horizontal)
+                .padding(.bottom)
+                .id(viewStore.databaseLoadingState)
             }
-            .padding(.horizontal)
-            .padding(.bottom)
-            .id(viewStore.databaseLoadingState)
+            .opacity(databaseError == nil ? 1 : 0)
+            if let error = databaseError {
+                ErrorView(error: error) {
+                    viewStore.send(.fetchDatabaseInfos(gid))
+                }
+            }
         }
         .fullScreenCover(unwrapping: viewStore.$route, case: /PreviewsReducer.Route.reading) { _ in
             ReadingView(

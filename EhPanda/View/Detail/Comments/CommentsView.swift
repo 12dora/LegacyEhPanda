@@ -54,7 +54,8 @@ struct CommentsView: View {
                     ? viewStore.scrollRowOpacity : 1
                 )
                 .swipeActions(edge: .leading) {
-                    if comment.votable {
+                    // Voting without an API key is guaranteed to be rejected.
+                    if comment.votable && !apiKey.isEmpty {
                         Button {
                             viewStore.send(.voteComment(gid, token, apiKey, comment.commentID, -1))
                         } label: {
@@ -64,7 +65,7 @@ struct CommentsView: View {
                     }
                 }
                 .swipeActions(edge: .trailing) {
-                    if comment.votable {
+                    if comment.votable && !apiKey.isEmpty {
                         Button {
                             viewStore.send(.voteComment(gid, token, apiKey, comment.commentID, 1))
                         } label: {
@@ -72,9 +73,12 @@ struct CommentsView: View {
                         }
                         .tint(.green)
                     }
-                    if comment.editable {
+                    // Editing replaces the whole comment, so it is only offered when the parsed
+                    // contents can be rebuilt exactly. Images and `[url=…]` targets cannot, and
+                    // submitting the lossy summary would delete them on the server.
+                    if comment.isNativelyEditable, let source = comment.editingSource {
                         Button {
-                            viewStore.send(.setCommentContent(comment.plainTextContent))
+                            viewStore.send(.setCommentContent(source))
                             viewStore.send(.setNavigation(.postComment(comment.commentID)))
                         } label: {
                             Image(systemSymbol: .squareAndPencil)
@@ -100,13 +104,15 @@ struct CommentsView: View {
                 : L10n.Localizable.PostCommentView.Title.postComment,
                 content: viewStore.$commentContent,
                 isFocused: viewStore.$postCommentFocused,
+                loadingState: viewStore.postCommentLoadingState,
+                // The sheet is dismissed by the reducer once the server confirmed the post,
+                // so a failure no longer throws the draft away.
                 postAction: {
                     if hasCommentID {
                         viewStore.send(.postComment(galleryURL, route.wrappedValue))
                     } else {
                         viewStore.send(.postComment(galleryURL))
                     }
-                    viewStore.send(.setNavigation(nil))
                 },
                 cancelAction: { viewStore.send(.setNavigation(nil)) },
                 onAppearAction: { viewStore.send(.onPostCommentAppear) }

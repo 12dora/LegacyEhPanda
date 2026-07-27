@@ -15,8 +15,15 @@ struct CommentsReducer: Reducer {
         case postComment(String)
     }
 
-    private enum CancelID: CaseIterable {
+    /// Scoped to the state instance: a detail nested inside comments hosts another comments
+    /// feature, and a shared static key let one instance's teardown cancel the other's work.
+    private enum CancelIdentifier: CaseIterable {
         case postComment, voteComment, fetchGallery
+    }
+
+    private struct CancelID: Hashable {
+        let instanceID: UUID
+        let identifier: CancelIdentifier
     }
 
     struct State: Equatable {
@@ -24,13 +31,16 @@ struct CommentsReducer: Reducer {
         @BindingState var commentContent = ""
         @BindingState var postCommentFocused = false
 
+        let instanceID: UUID
         var hudConfig: AppToastConfig = .loading
+        var postCommentLoadingState: LoadingState = .idle
         var scrollCommentID: String?
         var scrollRowOpacity: Double = 1
 
         @Heap var detailState: DetailReducer.State!
 
-        init() {
+        init(instanceID: UUID = .init()) {
+            self.instanceID = instanceID
             _detailState = .init(.init())
         }
     }
@@ -55,8 +65,9 @@ struct CommentsReducer: Reducer {
 
         case teardown
         case postComment(URL, String? = nil)
+        case postCommentDone(Result<Any, AppError>)
         case voteComment(String, String, String, String, Int)
-        case performCommentActionDone(Result<Any, AppError>)
+        case voteCommentDone(Result<Any, AppError>)
         case fetchGallery(URL, Bool)
         case fetchGalleryDone(URL, Result<Gallery, AppError>)
 
@@ -85,9 +96,17 @@ struct CommentsReducer: Reducer {
                 return route == nil ? .send(.clearSubStates) : .none
 
             case .clearSubStates:
-                state.detailState = .init()
+                // Keep the nested detail's cancellation identity — and those of its own sub
+                // features — so the teardown below still reaches every request the replaced
+                // state started.
+                if let previous = state.detailState {
+                    state.detailState = .init(replacing: previous)
+                } else {
+                    state.detailState = .init()
+                }
                 state.commentContent = .init()
                 state.postCommentFocused = false
+                state.postCommentLoadingState = .idle
                 return .send(.detail(.teardown))
 
             case .clearScrollCommentID:
@@ -176,14 +195,26 @@ struct CommentsReducer: Reducer {
             case .updateReadingProgress(let gid, let progress):
                 guard !gid.isEmpty else { return .none }
                 return .run { _ in
-                    await databaseClient.updateReadingProgress(gid: gid, progress: progress)
+                    let result = await databaseClient.updateReadingProgress(gid: gid, progress: progress)
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to persist comment reading progress.", context: [
+                            "gid": gid, "progress": progress, "error": "\(error)"
+                        ])
+                    }
                 }
 
             case .teardown:
-                return .merge(CancelID.allCases.map(Effect.cancel(id:)))
+                let effects: [Effect<Action>] = CancelIdentifier.allCases.map {
+                    .cancel(id: CancelID(instanceID: state.instanceID, identifier: $0))
+                }
+                return .merge(effects)
 
             case .postComment(let galleryURL, let commentID):
-                guard !state.commentContent.isEmpty else { return .none }
+                guard !state.commentContent.isEmpty,
+                      state.postCommentLoadingState != .loading
+                else { return .none }
+                state.postCommentLoadingState = .loading
+                let cancelID = CancelID(instanceID: state.instanceID, identifier: .postComment)
                 if let commentID = commentID {
                     return .run { [commentContent = state.commentContent] send in
                         let response = await EditGalleryCommentRequest(
@@ -192,22 +223,42 @@ struct CommentsReducer: Reducer {
                             galleryURL: galleryURL
                         )
                         .response()
-                        await send(.performCommentActionDone(response))
+                        await send(.postCommentDone(response))
                     }
-                    .cancellable(id: CancelID.postComment)
+                    .cancellable(id: cancelID)
                 } else {
                     return .run { [commentContent = state.commentContent] send in
                         let response = await CommentGalleryRequest(
                             content: commentContent, galleryURL: galleryURL
                         )
                         .response()
-                        await send(.performCommentActionDone(response))
+                        await send(.postCommentDone(response))
                     }
-                    .cancellable(id: CancelID.postComment)
+                    .cancellable(id: cancelID)
+                }
+
+            case .postCommentDone(let result):
+                switch result {
+                case .success:
+                    // Only a confirmed post may discard what the user typed, and never a draft
+                    // that was retyped after the sheet had already been dismissed.
+                    if state.postCommentLoadingState == .loading {
+                        state.postCommentLoadingState = .idle
+                        state.commentContent = .init()
+                        state.postCommentFocused = false
+                        state.route = nil
+                    }
+                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) })
+                case .failure(let error):
+                    // Keep the sheet and the draft; the sheet renders the reason.
+                    guard state.postCommentLoadingState == .loading else { return .none }
+                    state.postCommentLoadingState = .failed(error)
+                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
                 }
 
             case .voteComment(let gid, let token, let apiKey, let commentID, let vote):
-                guard let gid = Int(gid), let commentID = Int(commentID),
+                // An empty API key makes the vote guaranteed invalid.
+                guard !apiKey.isEmpty, let gid = Int(gid), let commentID = Int(commentID),
                       let apiuid = Int(cookieClient.apiuid)
                 else { return .none }
                 return .run {  send in
@@ -220,14 +271,20 @@ struct CommentsReducer: Reducer {
                         commentVote: vote
                     )
                     .response()
-                    await send(.performCommentActionDone(response))
+                    await send(.voteCommentDone(response))
                 }
-                .cancellable(id: CancelID.voteComment)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .voteComment))
 
-            case .performCommentActionDone:
-                return .none
+            case .voteCommentDone(let result):
+                guard case .failure(let error) = result else {
+                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) })
+                }
+                state.hudConfig = .error(caption: error.alertText)
+                state.route = .hud
+                return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
 
             case .fetchGallery(let url, let isGalleryImageURL):
+                state.hudConfig = .loading
                 state.route = .hud
                 return .run {  send in
                     let response = await GalleryReverseRequest(
@@ -236,15 +293,24 @@ struct CommentsReducer: Reducer {
                     .response()
                     await send(.fetchGalleryDone(url, response))
                 }
-                .cancellable(id: CancelID.fetchGallery)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchGallery))
 
             case .fetchGalleryDone(let url, let result):
                 state.route = nil
                 switch result {
                 case .success(let gallery):
                     return .run { send in
-                        await databaseClient.cacheGalleries([gallery])
-                        await send(.handleGalleryLink(url))
+                        let result = await databaseClient.cacheGalleries([gallery])
+                        switch result {
+                        case .success:
+                            await send(.handleGalleryLink(url))
+                        case .failure(let error):
+                            Logger.error("Failed to cache comment reverse lookup gallery.", context: [
+                                "gid": gallery.id, "error": "\(error)"
+                            ])
+                            await send(.setHUDConfig(.error))
+                            await send(.setNavigation(.hud))
+                        }
                     }
                 case .failure:
                     return .run { send in

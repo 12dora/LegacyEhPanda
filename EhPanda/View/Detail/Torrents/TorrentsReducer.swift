@@ -14,14 +14,24 @@ struct TorrentsReducer: Reducer {
         case share(URL)
     }
 
-    private enum CancelID: CaseIterable {
+    /// Scoped to the state instance so one torrents sheet's teardown cannot cancel another's.
+    private enum CancelIdentifier: CaseIterable {
         case fetchTorrent, fetchGalleryTorrents
+    }
+
+    private struct CancelID: Hashable {
+        let instanceID: UUID
+        let identifier: CancelIdentifier
     }
 
     struct State: Equatable {
         @BindingState var route: Route?
+        var instanceID = UUID()
         var torrents = [GalleryTorrent]()
         var loadingState: LoadingState = .idle
+        /// Hash of the torrent currently being downloaded, so the row can show progress and
+        /// a second tap cannot start the same download twice.
+        var downloadingTorrentHash: String?
         var hudConfig: AppToastConfig = .copiedToClipboardSucceeded
     }
 
@@ -56,6 +66,7 @@ struct TorrentsReducer: Reducer {
                 return .none
 
             case .copyText(let magnetURL):
+                state.hudConfig = .copiedToClipboardSucceeded
                 state.route = .hud
                 return .merge(
                     .run(operation: { _ in clipboardClient.saveText(magnetURL) }),
@@ -63,26 +74,42 @@ struct TorrentsReducer: Reducer {
                 )
 
             case .presentTorrentActivity(let hash, let data):
-                if let url = fileClient.saveTorrent(hash: hash, data: data) {
-                    return .send(.setNavigation(.share(url)))
+                guard let url = fileClient.saveTorrent(hash: hash, data: data) else {
+                    // Writing the torrent failed: the button must not just do nothing.
+                    state.hudConfig = .error(caption: AppError.notFound.alertText)
+                    state.route = .hud
+                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
                 }
-                return .none
+                return .send(.setNavigation(.share(url)))
 
             case .fetchTorrent(let hash, let torrentURL):
+                guard state.downloadingTorrentHash == nil else { return .none }
+                state.downloadingTorrentHash = hash
                 return .run { send in
                     let response = await DataRequest(url: torrentURL).response()
                     await send(.fetchTorrentDone(hash, response))
                 }
-                .cancellable(id: CancelID.fetchTorrent)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchTorrent))
 
             case .teardown:
-                return .merge(CancelID.allCases.map(Effect.cancel(id:)))
+                let effects: [Effect<Action>] = CancelIdentifier.allCases.map {
+                    .cancel(id: CancelID(instanceID: state.instanceID, identifier: $0))
+                }
+                return .merge(effects)
 
             case .fetchTorrentDone(let hash, let result):
-                if case .success(let data) = result, !data.isEmpty {
+                state.downloadingTorrentHash = nil
+                switch result {
+                case .success(let data) where !data.isEmpty:
                     return .send(.presentTorrentActivity(hash, data))
+                case .success:
+                    // An empty body is a failed download, not a torrent worth sharing.
+                    state.hudConfig = .error(caption: AppError.notFound.alertText)
+                case .failure(let error):
+                    state.hudConfig = .error(caption: error.alertText)
                 }
-                return .none
+                state.route = .hud
+                return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
 
             case .fetchGalleryTorrents(let gid, let token):
                 guard state.loadingState != .loading else { return .none }
@@ -91,7 +118,7 @@ struct TorrentsReducer: Reducer {
                     let response = await GalleryTorrentsRequest(gid: gid, token: token).response()
                     await send(.fetchGalleryTorrentsDone(response))
                 }
-                .cancellable(id: CancelID.fetchGalleryTorrents)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchGalleryTorrents))
 
             case .fetchGalleryTorrentsDone(let result):
                 state.loadingState = .idle

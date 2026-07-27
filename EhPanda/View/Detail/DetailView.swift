@@ -68,6 +68,7 @@ struct DetailView: View {
                         galleryDetail: viewStore.galleryDetail ?? .empty,
                         userRating: viewStore.userRating,
                         showUserRating: viewStore.showsUserRating,
+                        isAPIReady: viewStore.isAPIReady,
                         showUserRatingAction: { viewStore.send(.toggleShowUserRating) },
                         updateRatingAction: { viewStore.send(.updateRating($0)) },
                         confirmRatingAction: { viewStore.send(.confirmRating($0)) },
@@ -80,6 +81,7 @@ struct DetailView: View {
                     if !viewStore.galleryTags.isEmpty {
                         TagsSection(
                             tags: viewStore.galleryTags, showsImages: setting.showsImagesInTags,
+                            isAPIReady: viewStore.isAPIReady,
                             voteTagAction: { viewStore.send(.voteTag($0, $1)) },
                             navigateSearchAction: { viewStore.send(.setNavigation(.detailSearch($0))) },
                             navigateTagDetailAction: { viewStore.send(.setNavigation(.tagDetail($0))) },
@@ -92,10 +94,8 @@ struct DetailView: View {
                             pageCount: viewStore.galleryDetail?.pageCount ?? 0,
                             previewURLs: viewStore.galleryPreviewURLs,
                             navigatePreviewsAction: { viewStore.send(.setNavigation(.previews)) },
-                            navigateReadingAction: {
-                                viewStore.send(.updateReadingProgress($0))
-                                viewStore.send(.setNavigation(.reading))
-                            }
+                            // One action: the page has to be persisted before the reader opens.
+                            navigateReadingAction: { viewStore.send(.navigateReading($0)) }
                         )
                     }
                     CommentsSection(
@@ -125,7 +125,8 @@ struct DetailView: View {
                     && viewStore.loadingState == .loading ? 1 : 0
                 )
             let error = (/LoadingState.failed).extract(from: viewStore.loadingState)
-            let retryAction: () -> Void = { viewStore.send(.fetchGalleryDetail) }
+            // Retrying from the database read up: a cache miss must be recoverable too.
+            let retryAction: () -> Void = { viewStore.send(.fetchDatabaseInfos(gid)) }
             ErrorView(error: error ?? .unknown, action: error?.isRetryable != false ? retryAction : nil)
                 .opacity(viewStore.galleryDetail == nil && error != nil ? 1 : 0)
         }
@@ -163,11 +164,12 @@ struct DetailView: View {
                 title: L10n.Localizable.PostCommentView.Title.postComment,
                 content: viewStore.$commentContent,
                 isFocused: viewStore.$postCommentFocused,
+                loadingState: viewStore.postCommentLoadingState,
+                // The sheet stays up until the post is confirmed, so a failure keeps the draft.
                 postAction: {
                     if let galleryURL = viewStore.gallery.galleryURL {
                         viewStore.send(.postComment(galleryURL))
                     }
-                    viewStore.send(.setNavigation(nil))
                 },
                 cancelAction: { viewStore.send(.setNavigation(nil)) },
                 onAppearAction: { viewStore.send(.onPostCommentAppear) }
@@ -505,6 +507,7 @@ private struct ActionSection: View {
     private let galleryDetail: GalleryDetail
     private let userRating: Int
     private let showUserRating: Bool
+    private let isAPIReady: Bool
     private let showUserRatingAction: () -> Void
     private let updateRatingAction: (DragGesture.Value) -> Void
     private let confirmRatingAction: (DragGesture.Value) -> Void
@@ -512,7 +515,7 @@ private struct ActionSection: View {
 
     init(
         galleryDetail: GalleryDetail,
-        userRating: Int, showUserRating: Bool,
+        userRating: Int, showUserRating: Bool, isAPIReady: Bool,
         showUserRatingAction: @escaping () -> Void,
         updateRatingAction: @escaping (DragGesture.Value) -> Void,
         confirmRatingAction: @escaping (DragGesture.Value) -> Void,
@@ -521,6 +524,7 @@ private struct ActionSection: View {
         self.galleryDetail = galleryDetail
         self.userRating = userRating
         self.showUserRating = showUserRating
+        self.isAPIReady = isAPIReady
         self.showUserRatingAction = showUserRatingAction
         self.updateRatingAction = updateRatingAction
         self.confirmRatingAction = confirmRatingAction
@@ -537,7 +541,8 @@ private struct ActionSection: View {
                         Text(L10n.Localizable.DetailView.ActionSection.Button.giveARating).bold()
                         Spacer()
                     }
-                    .disabled(!CookieUtil.didLogin)
+                    // Rating needs the API key that only a refreshed gallery page provides.
+                    .disabled(!CookieUtil.didLogin || !isAPIReady)
                     Button(action: navigateSimilarGalleryAction) {
                         Spacer()
                         Image(systemSymbol: .photoOnRectangleAngled)
@@ -569,13 +574,14 @@ private struct ActionSection: View {
 private struct TagsSection: View {
     private let tags: [GalleryTag]
     private let showsImages: Bool
+    private let isAPIReady: Bool
     private let voteTagAction: (String, Int) -> Void
     private let navigateSearchAction: (String) -> Void
     private let navigateTagDetailAction: (TagDetail) -> Void
     private let translateAction: (String) -> (String, TagTranslation?)
 
     init(
-        tags: [GalleryTag], showsImages: Bool,
+        tags: [GalleryTag], showsImages: Bool, isAPIReady: Bool,
         voteTagAction: @escaping (String, Int) -> Void,
         navigateSearchAction: @escaping (String) -> Void,
         navigateTagDetailAction: @escaping (TagDetail) -> Void,
@@ -583,6 +589,7 @@ private struct TagsSection: View {
     ) {
         self.tags = tags
         self.showsImages = showsImages
+        self.isAPIReady = isAPIReady
         self.voteTagAction = voteTagAction
         self.navigateSearchAction = navigateSearchAction
         self.navigateTagDetailAction = navigateTagDetailAction
@@ -593,7 +600,7 @@ private struct TagsSection: View {
         VStack(alignment: .leading) {
             ForEach(tags) { tag in
                 TagRow(
-                    tag: tag, showsImages: showsImages,
+                    tag: tag, showsImages: showsImages, isAPIReady: isAPIReady,
                     voteTagAction: voteTagAction,
                     navigateSearchAction: navigateSearchAction,
                     navigateTagDetailAction: navigateTagDetailAction,
@@ -612,13 +619,14 @@ private extension TagsSection {
 
         private let tag: GalleryTag
         private let showsImages: Bool
+        private let isAPIReady: Bool
         private let voteTagAction: (String, Int) -> Void
         private let navigateSearchAction: (String) -> Void
         private let navigateTagDetailAction: (TagDetail) -> Void
         private let translateAction: (String) -> (String, TagTranslation?)
 
         init(
-            tag: GalleryTag, showsImages: Bool,
+            tag: GalleryTag, showsImages: Bool, isAPIReady: Bool,
             voteTagAction: @escaping (String, Int) -> Void,
             navigateSearchAction: @escaping (String) -> Void,
             navigateTagDetailAction: @escaping (TagDetail) -> Void,
@@ -626,6 +634,7 @@ private extension TagsSection {
         ) {
             self.tag = tag
             self.showsImages = showsImages
+            self.isAPIReady = isAPIReady
             self.voteTagAction = voteTagAction
             self.navigateSearchAction = navigateSearchAction
             self.navigateTagDetailAction = navigateTagDetailAction
@@ -676,7 +685,8 @@ private extension TagsSection {
                                 Text(L10n.Localizable.DetailView.ContextMenu.Button.detail)
                             }
                         }
-                        if CookieUtil.didLogin {
+                        // Tag votes carry the API key, so hide them until it is available.
+                        if CookieUtil.didLogin && isAPIReady {
                             if content.isVotedUp || content.isVotedDown {
                                 Button {
                                     voteTagAction(content.voteKeyword(tag: tag), content.isVotedUp ? -1 : 1)

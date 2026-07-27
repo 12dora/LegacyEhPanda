@@ -14,16 +14,28 @@ struct ArchivesReducer: Reducer {
         case communicatingHUD
     }
 
-    private enum CancelID: CaseIterable {
+    /// Scoped to the state instance so one archives sheet's teardown cannot cancel another's.
+    private enum CancelIdentifier: CaseIterable {
         case fetchArchive, fetchArchiveFunds, fetchDownloadResponse
+    }
+
+    private struct CancelID: Hashable {
+        let instanceID: UUID
+        let identifier: CancelIdentifier
     }
 
     struct State: Equatable {
         @BindingState var route: Route?
         @BindingState var selectedArchive: GalleryArchive.HathArchive?
 
+        var instanceID = UUID()
         var loadingState: LoadingState = .idle
         var hathArchives = [GalleryArchive.HathArchive]()
+
+        /// Balances are kept here, not only persisted, so a refresh is visible immediately
+        /// in the open sheet instead of after the next relaunch.
+        var galleryPoints: String?
+        var credits: String?
 
         var messageHUDConfig = AppToastConfig()
         var communicatingHUDConfig: AppToastConfig = .communicating
@@ -61,12 +73,22 @@ struct ArchivesReducer: Reducer {
                 return .none
 
             case .syncGalleryFunds(let galleryPoints, let credits):
+                state.galleryPoints = galleryPoints
+                state.credits = credits
                 return .run { _ in
-                    await databaseClient.updateGalleryFunds(galleryPoints: galleryPoints, credits: credits)
+                    let result = await databaseClient.updateGalleryFunds(
+                        galleryPoints: galleryPoints, credits: credits
+                    )
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to persist gallery funds.", context: ["error": "\(error)"])
+                    }
                 }
 
             case .teardown:
-                return .merge(CancelID.allCases.map(Effect.cancel(id:)))
+                let effects: [Effect<Action>] = CancelIdentifier.allCases.map {
+                    .cancel(id: CancelID(instanceID: state.instanceID, identifier: $0))
+                }
+                return .merge(effects)
 
             case .fetchArchive(let gid, let galleryURL, let archiveURL):
                 guard state.loadingState != .loading else { return .none }
@@ -75,7 +97,7 @@ struct ArchivesReducer: Reducer {
                     let response = await GalleryArchiveRequest(archiveURL: archiveURL).response()
                     await send(.fetchArchiveDone(gid, galleryURL, response))
                 }
-                .cancellable(id: CancelID.fetchArchive)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchArchive))
 
             case .fetchArchiveDone(let gid, let galleryURL, let result):
                 state.loadingState = .idle
@@ -104,7 +126,7 @@ struct ArchivesReducer: Reducer {
                     let response = await GalleryArchiveFundsRequest(gid: gid, galleryURL: galleryURL).response()
                     await send(.fetchArchiveFundsDone(response))
                 }
-                .cancellable(id: CancelID.fetchArchiveFunds)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchArchiveFunds))
 
             case .fetchArchiveFundsDone(let result):
                 if case .success(let (galleryPoints, credits)) = result {
@@ -125,7 +147,7 @@ struct ArchivesReducer: Reducer {
                     .response()
                     await send(.fetchDownloadResponseDone(response))
                 }
-                .cancellable(id: CancelID.fetchDownloadResponse)
+                .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchDownloadResponse))
 
             case .fetchDownloadResponseDone(let result):
                 state.route = .messageHUD

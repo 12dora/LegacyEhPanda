@@ -25,14 +25,28 @@ struct DetailReducer: Reducer {
         case galleryInfos(Gallery, GalleryDetail)
     }
 
-    private enum CancelID: CaseIterable {
-        case fetchDatabaseInfos, fetchGalleryDetail, rateGallery, favorGallery, unfavorGallery, postComment, voteTag
+    /// Cancellation identity is scoped to the state instance: several `DetailReducer`s are
+    /// alive at once (app route, each list, nested comment detail) and a shared static key made
+    /// one instance's teardown cancel another instance's in-flight requests.
+    private enum CancelIdentifier: CaseIterable {
+        case fetchDatabaseInfos, fetchGalleryDetail, rateGallery
+        case favorGallery, unfavorGallery, postComment, voteTag
+    }
+
+    private struct CancelID: Hashable {
+        let instanceID: UUID
+        let identifier: CancelIdentifier
     }
 
     struct State: Equatable {
         @BindingState var route: Route?
         @BindingState var commentContent = ""
         @BindingState var postCommentFocused = false
+
+        /// Identifies this feature instance so cancellation never crosses instances.
+        /// Pass the previous instance's identifier when replacing a state whose effects
+        /// still have to be torn down, otherwise `teardown` cannot reach them.
+        let instanceID: UUID
 
         var showsNewDawnGreeting = false
         var showsUserRating = false
@@ -41,6 +55,7 @@ struct DetailReducer: Reducer {
 
         var apiKey = ""
         var loadingState: LoadingState = .idle
+        var postCommentLoadingState: LoadingState = .idle
         var gallery: Gallery = .empty
         var galleryDetail: GalleryDetail?
         var galleryTags = [GalleryTag]()
@@ -59,14 +74,66 @@ struct DetailReducer: Reducer {
         var galleryInfosState = GalleryInfosReducer.State()
         @Heap var detailSearchState: DetailSearchReducer.State?
 
-        init() {
+        init(instanceID: UUID = .init()) {
+            self.instanceID = instanceID
             _commentsState = .init(nil)
             _detailSearchState = .init(nil)
+        }
+
+        /// Builds the state that takes `previous`'s place in the same navigation slot: every
+        /// gallery-level value starts empty, but this feature's *and* its sub features'
+        /// cancellation identities are carried over. Without that carry-over the `teardown`
+        /// that accompanies a replacement reduces against fresh identities, so an archives,
+        /// torrents or previews response that was already in flight survives and writes the
+        /// previous gallery's data into the replacement.
+        init(replacing previous: State) {
+            self.init(instanceID: previous.instanceID)
+            adoptSubStateIdentities(from: previous)
+        }
+
+        /// Rating and voting endpoints are only valid once the gallery page handed us an API
+        /// key; cached state alone enables the controls while the key is still empty.
+        var isAPIReady: Bool {
+            !apiKey.isEmpty
         }
 
         mutating func updateRating(value: DragGesture.Value) {
             let rating = Int(value.location.x / 31 * 2) + 1
             userRating = min(max(rating, 1), 10)
+        }
+
+        /// Single conversion from the server's star rating to the half-star control's scale,
+        /// shared by the cached and the refreshed path so 4.5 never collapses to 4.0.
+        static func halfStars(from rating: Float) -> Int {
+            min(max(Int((rating * 2).rounded()), 0), 10)
+        }
+
+        /// The single list of sub features that own a cancellation identity: each is re-created
+        /// empty while keeping the identity `source` used, so a `teardown` issued afterwards
+        /// still reaches the requests those sub features had started. A new sub feature with an
+        /// `instanceID` has to be added here — `resetSubStatesPreservingIdentity()` and
+        /// `init(replacing:)` both go through it.
+        ///
+        /// `readingState`, `galleryInfosState` and `detailSearchState` are omitted on purpose:
+        /// they cancel through static keys and have no identity to preserve.
+        private mutating func adoptSubStateIdentities(from source: State) {
+            archivesState = .init(instanceID: source.archivesState.instanceID)
+            torrentsState = .init(instanceID: source.torrentsState.instanceID)
+            previewsState = .init(instanceID: source.previewsState.instanceID)
+            commentsState = .init(instanceID: source.commentsState?.instanceID ?? UUID())
+        }
+
+        /// Replaces every sub state while keeping their cancellation identities, so the
+        /// teardown that follows still cancels the effects those sub states started.
+        mutating func resetSubStatesPreservingIdentity() {
+            let previous = self
+            readingState = .init()
+            adoptSubStateIdentities(from: previous)
+            commentContent = .init()
+            postCommentFocused = false
+            postCommentLoadingState = .idle
+            galleryInfosState = .init()
+            detailSearchState = .init()
         }
     }
 
@@ -93,18 +160,21 @@ struct DetailReducer: Reducer {
         case syncPreviewConfig(PreviewConfig)
         case saveGalleryHistory
         case updateReadingProgress(Int)
+        case navigateReading(Int)
         case downloadGallery
 
         case teardown
         case fetchDatabaseInfos(String)
         case fetchDatabaseInfosDone(GalleryState)
+        case fetchDatabaseInfosFailed(String)
         case fetchGalleryDetail
-        case fetchGalleryDetailDone(Result<(GalleryDetail, GalleryState, String, Greeting?), AppError>)
+        case fetchGalleryDetailDone(String, Result<(GalleryDetail, GalleryState, String, Greeting?), AppError>)
 
         case rateGallery
         case favorGallery(Int)
         case unfavorGallery
         case postComment(URL)
+        case postCommentDone(Result<Any, AppError>)
         case voteTag(String, Int)
         case anyGalleryOpsDone(Result<Any, AppError>)
 
@@ -121,8 +191,15 @@ struct DetailReducer: Reducer {
     @Dependency(\.hapticsClient) private var hapticsClient
     @Dependency(\.cookieClient) private var cookieClient
 
-    private var teardownEffect: Effect<Action> {
-        var effects: [Effect<Action>] = CancelID.allCases.map { .cancel(id: $0) }
+    /// How long a freshly opened detail waits for the list's background cache write to land
+    /// before it declares the gallery genuinely missing.
+    private static let galleryCacheRetryCount = 8
+    private static let galleryCacheRetryInterval = 250
+
+    private func teardownEffect(instanceID: UUID) -> Effect<Action> {
+        var effects: [Effect<Action>] = CancelIdentifier.allCases.map {
+            .cancel(id: CancelID(instanceID: instanceID, identifier: $0))
+        }
         effects.append(contentsOf: [
             .send(.reading(.teardown)),
             .send(.archives(.teardown)),
@@ -151,15 +228,7 @@ struct DetailReducer: Reducer {
                     return route == nil ? .send(.clearSubStates) : .none
 
                 case .clearSubStates:
-                    state.readingState = .init()
-                    state.archivesState = .init()
-                    state.torrentsState = .init()
-                    state.previewsState = .init()
-                    state.commentsState = .init()
-                    state.commentContent = .init()
-                    state.postCommentFocused = false
-                    state.galleryInfosState = .init()
-                    state.detailSearchState = .init()
+                    state.resetSubStatesPreservingIdentity()
                     return .merge(
                         .send(.reading(.teardown)),
                         .send(.archives(.teardown)),
@@ -222,40 +291,102 @@ struct DetailReducer: Reducer {
 
                 case .syncGalleryTags:
                     return .run { [state] _ in
-                        await databaseClient.updateGalleryTags(gid: state.gallery.id, tags: state.galleryTags)
+                        let result = await databaseClient.updateGalleryTags(
+                            gid: state.gallery.id, tags: state.galleryTags
+                        )
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist gallery tags.", context: [
+                                "gid": state.gallery.id, "error": "\(error)"
+                            ])
+                        }
                     }
 
                 case .syncGalleryDetail:
                     guard let detail = state.galleryDetail else { return .none }
-                    return .run(operation: { _ in await databaseClient.cacheGalleryDetail(detail) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleryDetail(detail)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist gallery detail.", context: [
+                                "gid": detail.gid, "error": "\(error)"
+                            ])
+                        }
+                    }
 
                 case .syncGalleryPreviewURLs:
                     return .run { [state] _ in
-                        await databaseClient
+                        let result = await databaseClient
                             .updatePreviewURLs(gid: state.gallery.id, previewURLs: state.galleryPreviewURLs)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist detail preview URLs.", context: [
+                                "gid": state.gallery.id, "error": "\(error)"
+                            ])
+                        }
                     }
 
                 case .syncGalleryComments:
                     return .run { [state] _ in
-                        await databaseClient.updateComments(gid: state.gallery.id, comments: state.galleryComments)
+                        let result = await databaseClient.updateComments(
+                            gid: state.gallery.id, comments: state.galleryComments
+                        )
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist gallery comments.", context: [
+                                "gid": state.gallery.id, "error": "\(error)"
+                            ])
+                        }
                     }
 
                 case .syncGreeting(let greeting):
-                    return .run(operation: { _ in await databaseClient.updateGreeting(greeting) })
+                    return .run { _ in
+                        let result = await databaseClient.updateGreeting(greeting)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist greeting.", context: ["error": "\(error)"])
+                        }
+                    }
 
                 case .syncPreviewConfig(let config):
                     return .run { [state] _ in
-                        await databaseClient.updatePreviewConfig(gid: state.gallery.id, config: config)
+                        let result = await databaseClient.updatePreviewConfig(gid: state.gallery.id, config: config)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist preview config.", context: [
+                                "gid": state.gallery.id, "error": "\(error)"
+                            ])
+                        }
                     }
 
                 case .saveGalleryHistory:
                     return .run { [state] _ in
-                        await databaseClient.updateLastOpenDate(gid: state.gallery.id)
+                        let result = await databaseClient.updateLastOpenDate(gid: state.gallery.id)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist gallery history.", context: [
+                                "gid": state.gallery.id, "error": "\(error)"
+                            ])
+                        }
                     }
 
                 case .updateReadingProgress(let progress):
                     return .run { [state] _ in
-                        await databaseClient.updateReadingProgress(gid: state.gallery.id, progress: progress)
+                        let result = await databaseClient.updateReadingProgress(
+                            gid: state.gallery.id, progress: progress
+                        )
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist detail reading progress.", context: [
+                                "gid": state.gallery.id, "progress": progress, "error": "\(error)"
+                            ])
+                        }
+                    }
+
+                case .navigateReading(let progress):
+                    // The reader reads its starting page back from the database, so hand the
+                    // page over in state first and only present it once the write has landed.
+                    state.readingState.setInitialReadingProgress(progress)
+                    return .run { [galleryID = state.gallery.id] send in
+                        let result = await databaseClient.updateReadingProgress(gid: galleryID, progress: progress)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to persist reading navigation progress.", context: [
+                                "gid": galleryID, "progress": progress, "error": "\(error)"
+                            ])
+                        }
+                        await send(.setNavigation(.reading))
                     }
 
                 case .downloadGallery:
@@ -271,13 +402,41 @@ struct DetailReducer: Reducer {
                     }
 
                 case .teardown:
-                    return teardownEffect
+                    return teardownEffect(instanceID: state.instanceID)
 
                 case .fetchDatabaseInfos(let gid):
-                    guard let gallery = databaseClient.fetchGallery(gid: gid) else { return .none }
+                    guard gid.isValidGID else {
+                        state.loadingState = .failed(.notFound)
+                        return .none
+                    }
+                    guard let gallery = databaseClient.fetchGallery(gid: gid) else {
+                        // The list that navigated here may still be writing its results on a
+                        // background context, so a miss is not final yet. Keep waiting for a
+                        // short while, then fail visibly instead of staying blank forever.
+                        state.loadingState = .loading
+                        return .run { send in
+                            for _ in 0..<Self.galleryCacheRetryCount {
+                                try await Task.sleep(for: .milliseconds(Self.galleryCacheRetryInterval))
+                                let isCached = await MainActor.run {
+                                    databaseClient.fetchGallery(gid: gid) != nil
+                                }
+                                if isCached {
+                                    await send(.fetchDatabaseInfos(gid))
+                                    return
+                                }
+                            }
+                            await send(.fetchDatabaseInfosFailed(gid))
+                        }
+                        .cancellable(
+                            id: CancelID(instanceID: state.instanceID, identifier: .fetchDatabaseInfos),
+                            cancelInFlight: true
+                        )
+                    }
                     state.gallery = gallery
+                    state.loadingState = .idle
                     if let detail = databaseClient.fetchGalleryDetail(gid: gid) {
                         state.galleryDetail = detail
+                        state.userRating = State.halfStars(from: detail.userRating)
                     }
                     return .merge(
                         .send(.saveGalleryHistory),
@@ -285,10 +444,16 @@ struct DetailReducer: Reducer {
                             guard let dbState = await databaseClient.fetchGalleryState(gid: galleryID) else { return }
                             await send(.fetchDatabaseInfosDone(dbState))
                         }
-                        .cancellable(id: CancelID.fetchDatabaseInfos)
+                        .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .fetchDatabaseInfos))
                     )
 
+                case .fetchDatabaseInfosFailed(let gid):
+                    guard state.gallery.id == gid || !state.gallery.id.isValidGID else { return .none }
+                    state.loadingState = .failed(.databaseUnavailable(nil))
+                    return .none
+
                 case .fetchDatabaseInfosDone(let galleryState):
+                    guard galleryState.gid == state.gallery.id else { return .none }
                     state.galleryTags = galleryState.tags
                     state.galleryPreviewURLs = galleryState.previewURLs
                     state.galleryComments = galleryState.comments
@@ -304,11 +469,18 @@ struct DetailReducer: Reducer {
                     state.loadingState = .loading
                     return .run { [galleryID = state.gallery.id] send in
                         let response = await GalleryDetailRequest(gid: galleryID, galleryURL: galleryURL).response()
-                        await send(.fetchGalleryDetailDone(response))
+                        await send(.fetchGalleryDetailDone(galleryID, response))
                     }
-                    .cancellable(id: CancelID.fetchGalleryDetail)
+                    // Reappearing (or refreshing after a mutation) replaces the pending request
+                    // instead of racing a second identical one against it.
+                    .cancellable(
+                        id: CancelID(instanceID: state.instanceID, identifier: .fetchGalleryDetail),
+                        cancelInFlight: true
+                    )
 
-                case .fetchGalleryDetailDone(let result):
+                case .fetchGalleryDetailDone(let gid, let result):
+                    // A replaced detail must never accept the previous gallery's response.
+                    guard gid == state.gallery.id else { return .none }
                     state.loadingState = .idle
                     switch result {
                     case .success(let (galleryDetail, galleryState, apiKey, greeting)):
@@ -323,7 +495,7 @@ struct DetailReducer: Reducer {
                         state.galleryTags = galleryState.tags
                         state.galleryPreviewURLs = galleryState.previewURLs
                         state.galleryComments = galleryState.comments
-                        state.userRating = Int(galleryDetail.userRating) * 2
+                        state.userRating = State.halfStars(from: galleryDetail.userRating)
                         if let greeting = greeting {
                             effects.append(.send(.syncGreeting(greeting)))
                             if !greeting.gainedNothing && state.showsNewDawnGreeting {
@@ -341,7 +513,9 @@ struct DetailReducer: Reducer {
                     return .none
 
                 case .rateGallery:
-                    guard let apiuid = Int(cookieClient.apiuid), let gid = Int(state.gallery.id)
+                    // Without an API key the request is guaranteed invalid, so do not send it.
+                    guard state.isAPIReady, let apiuid = Int(cookieClient.apiuid),
+                          let gid = Int(state.gallery.id)
                     else { return .none }
                     return .run { [state] send in
                         let response = await RateGalleryRequest(
@@ -353,7 +527,8 @@ struct DetailReducer: Reducer {
                         )
                         .response()
                         await send(.anyGalleryOpsDone(response))
-                    }.cancellable(id: CancelID.rateGallery)
+                    }
+                    .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .rateGallery))
 
                 case .favorGallery(let favIndex):
                     return .run { [state] send in
@@ -365,28 +540,54 @@ struct DetailReducer: Reducer {
                         .response()
                         await send(.anyGalleryOpsDone(response))
                     }
-                    .cancellable(id: CancelID.favorGallery)
+                    .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .favorGallery))
 
                 case .unfavorGallery:
                     return .run { [galleryID = state.gallery.id] send in
                         let response = await UnfavorGalleryRequest(gid: galleryID).response()
                         await send(.anyGalleryOpsDone(response))
                     }
-                    .cancellable(id: CancelID.unfavorGallery)
+                    .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .unfavorGallery))
 
                 case .postComment(let galleryURL):
-                    guard !state.commentContent.isEmpty else { return .none }
+                    guard !state.commentContent.isEmpty,
+                          state.postCommentLoadingState != .loading
+                    else { return .none }
+                    state.postCommentLoadingState = .loading
                     return .run { [commentContent = state.commentContent] send in
                         let response = await CommentGalleryRequest(
                             content: commentContent, galleryURL: galleryURL
                         )
                         .response()
-                        await send(.anyGalleryOpsDone(response))
+                        await send(.postCommentDone(response))
                     }
-                    .cancellable(id: CancelID.postComment)
+                    .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .postComment))
+
+                case .postCommentDone(let result):
+                    switch result {
+                    case .success:
+                        // The draft is only thrown away once the server confirmed the post, and
+                        // never when the sheet was already dismissed and retyped in between.
+                        if state.postCommentLoadingState == .loading {
+                            state.postCommentLoadingState = .idle
+                            state.commentContent = .init()
+                            state.postCommentFocused = false
+                            state.route = nil
+                        }
+                        return .merge(
+                            .send(.fetchGalleryDetail),
+                            .run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) })
+                        )
+                    case .failure(let error):
+                        // Keep the sheet and the draft, and show why it failed.
+                        guard state.postCommentLoadingState == .loading else { return .none }
+                        state.postCommentLoadingState = .failed(error)
+                        return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
+                    }
 
                 case .voteTag(let tag, let vote):
-                    guard let apiuid = Int(cookieClient.apiuid), let gid = Int(state.gallery.id)
+                    guard state.isAPIReady, let apiuid = Int(cookieClient.apiuid),
+                          let gid = Int(state.gallery.id)
                     else { return .none }
                     return .run { [state] send in
                         let response = await VoteGalleryTagRequest(
@@ -400,16 +601,22 @@ struct DetailReducer: Reducer {
                         .response()
                         await send(.anyGalleryOpsDone(response))
                     }
-                    .cancellable(id: CancelID.voteTag)
+                    .cancellable(id: CancelID(instanceID: state.instanceID, identifier: .voteTag))
 
                 case .anyGalleryOpsDone(let result):
-                    if case .success = result {
+                    switch result {
+                    case .success:
                         return .merge(
                             .send(.fetchGalleryDetail),
                             .run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) })
                         )
+                    case .failure(let error):
+                        // Server-side rejections are real failures now, so say so instead of
+                        // only playing an error haptic.
+                        state.hudConfig = .error(caption: error.alertText)
+                        state.route = .hud
+                        return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
                     }
-                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
 
                 case .reading(.onPerformDismiss):
                     return .send(.setNavigation(nil))
@@ -426,8 +633,11 @@ struct DetailReducer: Reducer {
                 case .previews:
                     return .none
 
-                case .comments(.performCommentActionDone(let result)):
-                    return .send(.anyGalleryOpsDone(result))
+                case .comments(.postCommentDone(let result)), .comments(.voteCommentDone(let result)):
+                    // The comments screen owns its own failure presentation; refresh the
+                    // detail only when the action actually succeeded.
+                    guard case .success = result else { return .none }
+                    return .send(.fetchGalleryDetail)
 
                 case .comments(.detail(let recursiveAction)):
                     guard state.commentsState != nil else { return .none }

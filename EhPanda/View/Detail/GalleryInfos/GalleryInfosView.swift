@@ -21,6 +21,16 @@ struct GalleryInfosView: View {
         self.galleryDetail = galleryDetail
     }
 
+    /// Locale-aware decimal formatting: `Int(_:)` truncated 3.75 GB to "3" and 4.5 stars to "4",
+    /// both in the label and in what the copy button put on the clipboard.
+    private static func formatted(_ value: Float, maximumFractionDigits: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = maximumFractionDigits
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
     private var infos: [Info] {
         [
             Info(title: L10n.Localizable.GalleryInfosView.Title.id, value: galleryDetail.gid),
@@ -64,7 +74,11 @@ struct GalleryInfosView: View {
             Info(title: L10n.Localizable.GalleryInfosView.Title.pageCount, value: String(galleryDetail.pageCount)),
             Info(
                 title: L10n.Localizable.GalleryInfosView.Title.fileSize,
-                value: String(Int(galleryDetail.sizeCount)) + galleryDetail.sizeType
+                value: [
+                    Self.formatted(galleryDetail.sizeCount, maximumFractionDigits: 2),
+                    galleryDetail.sizeType
+                ]
+                .filter({ !$0.isEmpty }).joined(separator: " ")
             ),
             Info(
                 title: L10n.Localizable.GalleryInfosView.Title.favoritedTimes,
@@ -81,11 +95,12 @@ struct GalleryInfosView: View {
             ),
             Info(
                 title: L10n.Localizable.GalleryInfosView.Title.averageRating,
-                value: String(Int(galleryDetail.rating))
+                value: Self.formatted(galleryDetail.rating, maximumFractionDigits: 2)
             ),
             Info(
                 title: L10n.Localizable.GalleryInfosView.Title.myRating,
-                value: galleryDetail.userRating == 0 ? nil : String(Int(galleryDetail.userRating))
+                value: galleryDetail.userRating == 0
+                ? nil : Self.formatted(galleryDetail.userRating, maximumFractionDigits: 1)
             ),
             Info(
                 title: L10n.Localizable.GalleryInfosView.Title.torrentCount,

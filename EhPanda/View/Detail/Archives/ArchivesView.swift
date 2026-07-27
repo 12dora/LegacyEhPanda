@@ -28,6 +28,15 @@ struct ArchivesView: View {
         self.archiveURL = archiveURL
     }
 
+    /// Prefers the balances the reducer just parsed over the snapshot this view was created
+    /// with, so a successful refresh shows up without reopening the sheet.
+    private var credits: Int? {
+        Int(viewStore.credits ?? user.credits ?? "")
+    }
+    private var galleryPoints: Int? {
+        Int(viewStore.galleryPoints ?? user.galleryPoints ?? "")
+    }
+
     // MARK: ArchiveView
     var body: some View {
         NavigationView {
@@ -35,7 +44,7 @@ struct ArchivesView: View {
                 VStack {
                     HathArchivesView(archives: viewStore.hathArchives, selection: viewStore.$selectedArchive)
                     Spacer()
-                    if let credits = Int(user.credits ?? ""), let galleryPoints = Int(user.galleryPoints ?? "") {
+                    if let credits = credits, let galleryPoints = galleryPoints {
                         ArchiveFundsView(credits: credits, galleryPoints: galleryPoints)
                     }
                     DownloadButton(isDisabled: viewStore.selectedArchive == nil) {
@@ -64,8 +73,8 @@ struct ArchivesView: View {
                 case: /ArchivesReducer.Route.messageHUD
             )
             .animation(.default, value: viewStore.hathArchives)
-            .animation(.default, value: user.galleryPoints)
-            .animation(.default, value: user.credits)
+            .animation(.default, value: galleryPoints)
+            .animation(.default, value: credits)
             .onAppear {
                 viewStore.send(.fetchArchive(gid, galleryURL, archiveURL))
             }

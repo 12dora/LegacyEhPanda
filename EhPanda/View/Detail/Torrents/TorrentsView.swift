@@ -27,7 +27,10 @@ struct TorrentsView: View {
         NavigationView {
             ZStack {
                 List(viewStore.torrents) { torrent in
-                    TorrentRow(torrent: torrent) { magnetURL in
+                    TorrentRow(
+                        torrent: torrent,
+                        isDownloading: viewStore.downloadingTorrentHash == torrent.hash
+                    ) { magnetURL in
                         viewStore.send(.copyText(magnetURL))
                     }
                     .swipeActions {
@@ -36,6 +39,7 @@ struct TorrentsView: View {
                         } label: {
                             Image(systemSymbol: .arrowDownDocFill)
                         }
+                        .disabled(viewStore.downloadingTorrentHash != nil)
                     }
                 }
                 LoadingView().opacity(viewStore.loadingState == .loading && viewStore.torrents.isEmpty ? 1 : 0)
@@ -66,10 +70,12 @@ struct TorrentsView: View {
 private extension TorrentsView {
     struct TorrentRow: View {
         private let torrent: GalleryTorrent
+        private let isDownloading: Bool
         private let action: (String) -> Void
 
-        init(torrent: GalleryTorrent, action: @escaping (String) -> Void) {
+        init(torrent: GalleryTorrent, isDownloading: Bool, action: @escaping (String) -> Void) {
             self.torrent = torrent
+            self.isDownloading = isDownloading
             self.action = action
         }
 
@@ -89,6 +95,9 @@ private extension TorrentsView {
                         Text("\(torrent.downloadCount)")
                     }
                     Spacer()
+                    if isDownloading {
+                        ProgressView()
+                    }
                     HStack(spacing: 3) {
                         Image(systemSymbol: .docCircle)
                         Text(torrent.fileSize)
