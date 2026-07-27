@@ -47,6 +47,9 @@ struct MigrationReducer: Reducer {
                 return .none
 
             case .prepareDatabase:
+                // Retrying has to show progress again, otherwise an identical repeated
+                // failure looks like a dead button.
+                state.databaseState = .loading
                 return .run { send in
                     let result = await databaseClient.prepareDatabase()
                     await send(.prepareDatabaseDone(result.error))

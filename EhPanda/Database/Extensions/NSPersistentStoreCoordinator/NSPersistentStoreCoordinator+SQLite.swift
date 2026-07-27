@@ -14,8 +14,7 @@ extension NSPersistentStoreCoordinator {
             let persistentStoreCoordinator = NSPersistentStoreCoordinator(managedObjectModel: NSManagedObjectModel())
             try persistentStoreCoordinator.destroyPersistentStore(at: storeURL, ofType: NSSQLiteStoreType, options: nil)
         } catch let error {
-            let message = ("Failed to destroy persistent store at \(storeURL), error: \(error).")
-            throw AppError.databaseCorrupted(message)
+            throw AppError.database(error, context: "Failed to destroy persistent store at \(storeURL).")
         }
     }
     static func replaceStore(at targetURL: URL, withStoreAt sourceURL: URL) throws {
@@ -27,8 +26,8 @@ extension NSPersistentStoreCoordinator {
                 sourceOptions: nil, ofType: NSSQLiteStoreType
             )
         } catch let error {
-            let message = "Failed to replace persistent store at \(targetURL) with \(sourceURL), error: \(error)."
-            throw AppError.databaseCorrupted(message)
+            let message = "Failed to replace persistent store at \(targetURL) with \(sourceURL)."
+            throw AppError.database(error, context: message)
         }
     }
 
@@ -44,8 +43,7 @@ extension NSPersistentStoreCoordinator {
                 ofType: NSSQLiteStoreType, configurationName: nil, at: storeURL, options: options
             )
         } catch {
-            let message = ("Failed to add persistent store to coordinator, error: \(error).")
-            throw AppError.databaseCorrupted(message)
+            throw AppError.database(error, context: "Failed to add persistent store to coordinator.")
         }
     }
 }

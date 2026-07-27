@@ -30,7 +30,12 @@ struct MigrationView: View {
                     .opacity(viewStore.databaseState == .loading ? 1 : 0)
                 let error = (/LoadingState.failed).extract(from: viewStore.databaseState)
                 let errorNonNil = error ?? .databaseCorrupted(nil)
-                AlertView(symbol: errorNonNil.symbol, message: errorNonNil.localizedDescription) {
+                // A locked, read-only or full storage is temporary, so retrying comes first
+                // and dropping the database stays a deliberate, confirmed last resort.
+                AlertView(symbol: errorNonNil.symbol, message: message(of: errorNonNil)) {
+                    AlertViewButton(title: L10n.Localizable.ErrorView.Button.retry) {
+                        viewStore.send(.prepareDatabase)
+                    }
                     AlertViewButton(title: L10n.Localizable.ErrorView.Button.dropDatabase) {
                         viewStore.send(.setNavigation(.dropDialog))
                     }
@@ -48,6 +53,11 @@ struct MigrationView: View {
             }
             .animation(.default, value: viewStore.databaseState)
         }
+    }
+
+    /// Prefers the guidance text, which names the underlying failure, over the bare title.
+    private func message(of error: AppError) -> String {
+        error.alertText.isEmpty ? error.localizedDescription : error.alertText
     }
 }
 

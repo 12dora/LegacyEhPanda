@@ -31,6 +31,9 @@
         <attribute name="uploader" attributeType="String" defaultValueString=""/>
         <attribute name="userRating" attributeType="Float" defaultValueString="0.0" usesScalarValueType="YES"/>
         <attribute name="visibility" optional="YES" attributeType="Binary"/>
+        <fetchIndex name="byGid">
+            <fetchIndexElement property="gid" type="Binary" order="ascending"/>
+        </fetchIndex>
     </entity>
     <entity name="GalleryMO" representedClassName=".GalleryMO" syncable="YES">
         <attribute name="category" attributeType="String" defaultValueString=""/>
@@ -45,6 +48,12 @@
         <attribute name="title" attributeType="String" defaultValueString=""/>
         <attribute name="token" attributeType="String" defaultValueString=""/>
         <attribute name="uploader" optional="YES" attributeType="String"/>
+        <fetchIndex name="byGid">
+            <fetchIndexElement property="gid" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byLastOpenDate">
+            <fetchIndexElement property="lastOpenDate" type="Binary" order="descending"/>
+        </fetchIndex>
     </entity>
     <entity name="GalleryStateMO" representedClassName=".GalleryStateMO" syncable="YES">
         <attribute name="comments" optional="YES" attributeType="Binary"/>
@@ -56,6 +65,9 @@
         <attribute name="readingProgress" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="tags" optional="YES" attributeType="Binary"/>
         <attribute name="thumbnailURLs" optional="YES" attributeType="Binary"/>
+        <fetchIndex name="byGid">
+            <fetchIndexElement property="gid" type="Binary" order="ascending"/>
+        </fetchIndex>
     </entity>
     <elements>
         <element name="AppEnvMO" positionX="-45" positionY="126" width="128" height="149"/>

@@ -38,9 +38,11 @@ class CoreDataMigrator: CoreDataMigratorProtocol {
                     destinationType: NSSQLiteStoreType, destinationOptions: nil
                 )
             } catch {
+                // A failed migration is not proof of damage: it also happens when the
+                // destination store cannot be written because storage is full or locked.
                 let message = "Failed attempting to migrate from \(migrationStep.sourceModel) "
-                + "to \(migrationStep.destinationModel), error: \(error)."
-                throw AppError.databaseCorrupted(message)
+                + "to \(migrationStep.destinationModel)."
+                throw AppError.database(error, context: message)
             }
 
             if currentURL != storeURL {
@@ -96,7 +98,7 @@ class CoreDataMigrator: CoreDataMigratorProtocol {
             let store = try persistentStoreCoordinator.addPersistentStore(at: storeURL, options: options)
             try persistentStoreCoordinator.remove(store)
         } catch {
-            throw AppError.databaseCorrupted("Failed to force WAL checkpointing, error: \(error).")
+            throw AppError.database(error, context: "Failed to force WAL checkpointing.")
         }
     }
 }

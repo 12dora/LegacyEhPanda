@@ -13,7 +13,7 @@ import ComposableArchitecture
 struct DatabaseClient {
     let prepareDatabase: () async -> Result<Void, AppError>
     let dropDatabase: () async -> Result<Void, AppError>
-    private let saveContext: () -> Void
+    private let saveContext: () -> Result<Void, AppError>
     private let materializedObjects: (NSManagedObjectContext, NSPredicate) -> [NSManagedObject]
 }
 
@@ -35,15 +35,11 @@ extension DatabaseClient {
         },
         saveContext: {
             let context = PersistenceController.shared.container.viewContext
+            var result: Result<Void, AppError> = .success(())
             AppUtil.dispatchMainSync {
-                guard context.hasChanges else { return }
-                do {
-                    try context.save()
-                } catch {
-                    Logger.error(error)
-                    fatalError("Unresolved error \(error)")
-                }
+                result = DatabaseClient.save(context)
             }
+            return result
         },
         materializedObjects: { context, predicate in
             var objects = [NSManagedObject]()
@@ -60,16 +56,39 @@ extension DatabaseClient {
 
 // MARK: Foundation
 extension DatabaseClient {
-    private func batchFetch<MO: NSManagedObject>(
+    /// Saves a context, rolling its unsaved changes back on failure. Release builds must
+    /// keep running: a disk, protection or store failure is reported, never fatal.
+    @discardableResult
+    fileprivate static func save(_ context: NSManagedObjectContext) -> Result<Void, AppError> {
+        guard context.hasChanges else { return .success(()) }
+        do {
+            try context.save()
+            return .success(())
+        } catch {
+            Logger.error("Failed in saving context.", context: ["error": error])
+            context.rollback()
+            return .failure(.databaseUnavailable("\(error)"))
+        }
+    }
+
+    /// Non-throwing wrapper that lets the existing call sites keep ignoring the outcome.
+    @discardableResult
+    private func saveViewContext() -> Result<Void, AppError> {
+        saveContext()
+    }
+
+    /// Distinguishes a failed fetch from an empty one, so that a caller never mistakes
+    /// an unreadable store for absent rows and inserts a duplicate.
+    private func batchFetchResult<MO: NSManagedObject>(
         entityType: MO.Type, fetchLimit: Int = 0, predicate: NSPredicate? = nil,
         findBeforeFetch: Bool = true, sortDescriptors: [NSSortDescriptor]? = nil
-    ) -> [MO] {
-        var results = [MO]()
+    ) -> Result<[MO], AppError> {
+        var result: Result<[MO], AppError> = .success([])
         let context = PersistenceController.shared.container.viewContext
         AppUtil.dispatchMainSync {
             if findBeforeFetch, let predicate = predicate {
                 if let objects = materializedObjects(context, predicate) as? [MO], !objects.isEmpty {
-                    results = objects
+                    result = .success(objects)
                     return
                 }
             }
@@ -79,9 +98,28 @@ extension DatabaseClient {
             request.predicate = predicate
             request.fetchLimit = fetchLimit
             request.sortDescriptors = sortDescriptors
-            results = (try? context.fetch(request)) ?? []
+            do {
+                result = .success(try context.fetch(request))
+            } catch {
+                Logger.error(
+                    "Failed in fetching managed objects.",
+                    context: ["entity": String(describing: entityType), "error": error]
+                )
+                result = .failure(.databaseUnavailable("\(error)"))
+            }
         }
-        return results
+        return result
+    }
+
+    private func batchFetch<MO: NSManagedObject>(
+        entityType: MO.Type, fetchLimit: Int = 0, predicate: NSPredicate? = nil,
+        findBeforeFetch: Bool = true, sortDescriptors: [NSSortDescriptor]? = nil
+    ) -> [MO] {
+        let result = batchFetchResult(
+            entityType: entityType, fetchLimit: fetchLimit, predicate: predicate,
+            findBeforeFetch: findBeforeFetch, sortDescriptors: sortDescriptors
+        )
+        return (try? result.get()) ?? []
     }
 
     private func fetch<MO: NSManagedObject>(
@@ -96,48 +134,125 @@ extension DatabaseClient {
         return managedObject
     }
 
+    /// Reconciles rows that an earlier fetch failure duplicated, and returns the survivor.
+    /// Fetch order must never decide which row lives: the most populated row wins, ties are
+    /// broken by object ID, every optional value the winner lacks is folded in from the
+    /// losers, and optional dates keep their newest value. Only then are the losers deleted.
+    fileprivate static func mergeDuplicates<MO: NSManagedObject>(
+        _ storedMOs: [MO], in context: NSManagedObjectContext
+    ) -> MO? {
+        guard storedMOs.count > 1 else { return storedMOs.first }
+        let optionalNames = storedMOs[0].entity.attributesByName.values
+            .filter(\.isOptional).map(\.name)
+        func populatedCount(_ managedObject: MO) -> Int {
+            optionalNames.filter { managedObject.value(forKey: $0) != nil }.count
+        }
+        let ordered = storedMOs.sorted { lhs, rhs in
+            let lhsCount = populatedCount(lhs)
+            let rhsCount = populatedCount(rhs)
+            guard lhsCount == rhsCount else { return lhsCount > rhsCount }
+            return lhs.objectID.uriRepresentation().absoluteString
+            < rhs.objectID.uriRepresentation().absoluteString
+        }
+        guard let winner = ordered.first else { return nil }
+        for name in optionalNames {
+            let values: [Any] = ordered.compactMap { $0.value(forKey: name) }
+            guard let winningValue = winner.value(forKey: name) else {
+                if let value = values.first {
+                    winner.setValue(value, forKey: name)
+                }
+                continue
+            }
+            if let winningDate = winningValue as? Date,
+               let latestDate = values.compactMap({ $0 as? Date }).max(), latestDate > winningDate {
+                winner.setValue(latestDate, forKey: name)
+            }
+        }
+        Logger.error(
+            "Merging duplicated managed objects...",
+            context: ["entity": winner.entity.name ?? "", "count": storedMOs.count]
+        )
+        ordered.dropFirst().forEach { context.delete($0) }
+        return winner
+    }
+
+    /// Reports a failure rather than inserting when the store cannot be read: the logical
+    /// row may well exist and would otherwise be durably duplicated.
     private func fetchOrCreate<MO: NSManagedObject>(
         entityType: MO.Type, predicate: NSPredicate? = nil,
         commitChanges: ((MO?) -> Void)? = nil
-    ) -> MO {
-        if let storedMO = fetch(
-            entityType: entityType, predicate: predicate, commitChanges: commitChanges
-        ) {
-            return storedMO
-        } else {
-            let newMO = MO(context: PersistenceController.shared.container.viewContext)
-            commitChanges?(newMO)
-            saveContext()
-            return newMO
+    ) -> Result<MO, AppError> {
+        var result: Result<MO, AppError> = .failure(.databaseUnavailable(nil))
+        AppUtil.dispatchMainSync {
+            let context = PersistenceController.shared.container.viewContext
+            switch batchFetchResult(entityType: entityType, predicate: predicate, findBeforeFetch: false) {
+            case .success(let storedMOs):
+                guard let storedMO = Self.mergeDuplicates(storedMOs, in: context) else {
+                    let newMO = MO(context: context)
+                    commitChanges?(newMO)
+                    result = saveViewContext().map { _ in newMO }
+                    return
+                }
+                commitChanges?(storedMO)
+                result = storedMOs.count > 1 ? saveViewContext().map { _ in storedMO } : .success(storedMO)
+            case .failure(let error):
+                result = .failure(error)
+            }
         }
+        return result
     }
 
+    @discardableResult
     private func batchUpdate<MO: NSManagedObject>(
         entityType: MO.Type, predicate: NSPredicate? = nil, commitChanges: ([MO]) -> Void
-    ) {
-        commitChanges(batchFetch(
+    ) -> Result<Void, AppError> {
+        let result = batchFetchResult(
             entityType: entityType,
             predicate: predicate,
             findBeforeFetch: false
-        ))
-        saveContext()
+        )
+        switch result {
+        case .success(let storedMOs):
+            commitChanges(storedMOs)
+            return saveViewContext()
+        case .failure(let error):
+            return .failure(error)
+        }
     }
+    @discardableResult
     private func update<MO: NSManagedObject>(
         entityType: MO.Type, predicate: NSPredicate? = nil,
         createIfNil: Bool = false, commitChanges: (MO) -> Void
-    ) {
+    ) -> Result<Void, AppError> {
+        var result: Result<Void, AppError> = .success(())
         AppUtil.dispatchMainSync {
             let storedMO: MO?
             if createIfNil {
-                storedMO = fetchOrCreate(entityType: entityType, predicate: predicate)
+                switch fetchOrCreate(entityType: entityType, predicate: predicate) {
+                case .success(let createdMO):
+                    storedMO = createdMO
+                case .failure(let error):
+                    result = .failure(error)
+                    return
+                }
             } else {
-                storedMO = fetch(entityType: entityType, predicate: predicate)
+                switch batchFetchResult(
+                    entityType: entityType, fetchLimit: 1,
+                    predicate: predicate, findBeforeFetch: true
+                ) {
+                case .success(let storedMOs):
+                    storedMO = storedMOs.first
+                case .failure(let error):
+                    result = .failure(error)
+                    return
+                }
             }
             if let storedMO = storedMO {
                 commitChanges(storedMO)
-                saveContext()
+                result = saveViewContext()
             }
         }
+        return result
     }
 }
 
@@ -153,29 +268,80 @@ extension DatabaseClient {
             findBeforeFetch: findBeforeFetch, commitChanges: commitChanges
         )
     }
-    private func fetchOrCreate<MO: GalleryIdentifiable>(entityType: MO.Type, gid: String) -> MO {
+    private func fetchOrCreate<MO: GalleryIdentifiable>(
+        entityType: MO.Type, gid: String
+    ) -> Result<MO, AppError> {
         fetchOrCreate(
             entityType: entityType,
             predicate: NSPredicate(format: "gid == %@", gid),
             commitChanges: { $0?.gid = gid }
         )
     }
+    @discardableResult
     private func update<MO: GalleryIdentifiable>(
         entityType: MO.Type, gid: String,
         createIfNil: Bool = false,
         commitChanges: @escaping ((MO) -> Void)
-    ) {
+    ) -> Result<Void, AppError> {
+        var result: Result<Void, AppError> = .success(())
         AppUtil.dispatchMainSync {
             let storedMO: MO?
             if createIfNil {
-                storedMO = fetchOrCreate(entityType: entityType, gid: gid)
+                switch fetchOrCreate(entityType: entityType, gid: gid) {
+                case .success(let createdMO):
+                    storedMO = createdMO
+                case .failure(let error):
+                    result = .failure(error)
+                    return
+                }
             } else {
-                storedMO = fetch(entityType: entityType, gid: gid)
+                switch batchFetchResult(
+                    entityType: entityType, fetchLimit: 1,
+                    predicate: NSPredicate(format: "gid == %@", gid),
+                    findBeforeFetch: true
+                ) {
+                case .success(let storedMOs):
+                    storedMO = storedMOs.first
+                case .failure(let error):
+                    result = .failure(error)
+                    return
+                }
             }
             if let storedMO = storedMO {
                 commitChanges(storedMO)
-                saveContext()
+                result = saveViewContext()
             }
+        }
+        return result
+    }
+
+    /// Fetch-or-insert for `GalleryMO` on the single serialized writer. `cacheGalleries`
+    /// upserts the same entity there, and two contexts racing the same absent GID would
+    /// each insert it, durably recreating the duplicates that M-52 removes.
+    @discardableResult
+    private func upsertGallery(
+        gid: String, commitChanges: @escaping (GalleryMO) -> Void
+    ) async -> Result<Void, AppError> {
+        let context = PersistenceController.shared.backgroundContext
+        return await context.perform {
+            let request = NSFetchRequest<GalleryMO>(entityName: "GalleryMO")
+            request.predicate = NSPredicate(format: "gid == %@", gid)
+            let storedMOs: [GalleryMO]
+            do {
+                storedMOs = try context.fetch(request)
+            } catch {
+                Logger.error("Failed in fetching a gallery.", context: ["gid": gid, "error": error])
+                return .failure(.databaseUnavailable("\(error)"))
+            }
+            let galleryMO: GalleryMO
+            if let storedMO = Self.mergeDuplicates(storedMOs, in: context) {
+                galleryMO = storedMO
+            } else {
+                galleryMO = GalleryMO(context: context)
+                galleryMO.gid = gid
+            }
+            commitChanges(galleryMO)
+            return Self.save(context)
         }
     }
 }
@@ -199,27 +365,49 @@ extension DatabaseClient {
         return entity
     }
     @MainActor func fetchAppEnv() -> AppEnv {
-        fetchOrCreate(entityType: AppEnvMO.self).toEntity()
+        (try? fetchOrCreate(entityType: AppEnvMO.self).get())?.toEntity() ?? Self.defaultAppEnv
     }
     func fetchAppEnvSynchronously() -> AppEnv {
-        fetchOrCreate(entityType: AppEnvMO.self).toEntity()
+        (try? fetchOrCreate(entityType: AppEnvMO.self).get())?.toEntity() ?? Self.defaultAppEnv
     }
     @MainActor func fetchGalleryState(gid: String) async -> GalleryState? {
         guard gid.isValidGID else { return nil }
-        return fetchOrCreate(entityType: GalleryStateMO.self, gid: gid).toEntity()
+        return (try? fetchOrCreate(entityType: GalleryStateMO.self, gid: gid).get())?.toEntity()
     }
-    @MainActor func fetchHistoryGalleries(fetchLimit: Int = 0) -> [Gallery] {
-        let predicate = NSPredicate(format: "lastOpenDate != nil")
-        let sortDescriptor = NSSortDescriptor(
-            keyPath: \GalleryMO.lastOpenDate, ascending: false
-        )
-        let galleries = batchFetch(
-            entityType: GalleryMO.self, fetchLimit: fetchLimit, predicate: predicate,
-            findBeforeFetch: false, sortDescriptors: [sortDescriptor]
-        )
-        .map { $0.toEntity() }
-        return galleries
+    /// Reads history on a private queue, in batches, so that a long history never blocks
+    /// the first screen. `keyword` filters in the store instead of walking a retained array,
+    /// and the default limit bounds how many rows a single call can ever materialize; use
+    /// `fetchOffset` to page beyond it.
+    func fetchHistoryGalleries(
+        fetchLimit: Int = 500, fetchOffset: Int = 0, keyword: String = ""
+    ) async -> [Gallery] {
+        let context = PersistenceController.shared.container.newBackgroundContext()
+        return await context.perform {
+            var predicates = [NSPredicate(format: "lastOpenDate != nil")]
+            if !keyword.isEmpty {
+                predicates.append(NSPredicate(format: "title CONTAINS[cd] %@", keyword))
+            }
+            let request = NSFetchRequest<GalleryMO>(entityName: "GalleryMO")
+            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+            request.sortDescriptors = [NSSortDescriptor(keyPath: \GalleryMO.lastOpenDate, ascending: false)]
+            request.fetchLimit = fetchLimit
+            request.fetchOffset = fetchOffset
+            request.fetchBatchSize = Self.fetchBatchSize
+            do {
+                return try context.fetch(request).map { $0.toEntity() }
+            } catch {
+                Logger.error("Failed in fetching history galleries.", context: ["error": error])
+                return []
+            }
+        }
     }
+
+    private static let fetchBatchSize = 50
+    private static let defaultAppEnv = AppEnv(
+        user: User(), setting: Setting(), searchFilter: Filter(), globalFilter: Filter(),
+        watchedFilter: Filter(), tagTranslator: TagTranslator(),
+        historyKeywords: [String](), quickSearchWords: [QuickSearchWord]()
+    )
 }
 // MARK: FetchAccessor
 extension DatabaseClient {
@@ -233,142 +421,172 @@ extension DatabaseClient {
             return fetchAppEnvSynchronously().watchedFilter
         }
     }
-    @MainActor func fetchHistoryKeywords() -> [String] {
-        fetchAppEnv().historyKeywords
-    }
     @MainActor func fetchQuickSearchWords() -> [QuickSearchWord] {
         fetchAppEnv().quickSearchWords
-    }
-    @MainActor func fetchGalleryPreviewURLs(gid: String) async -> [Int: URL]? {
-        guard gid.isValidGID else { return nil }
-        return await fetchGalleryState(gid: gid).map(\.previewURLs)
     }
 }
 
 // MARK: UpdateGallery
 extension DatabaseClient {
-    @MainActor func updateGallery(gid: String, key: String, value: Any?) {
-        guard gid.isValidGID else { return }
-        update(
-            entityType: GalleryMO.self, gid: gid, createIfNil: true,
-            commitChanges: { $0.setValue(value, forKeyPath: key) }
-        )
+    /// Routed through the serialized writer that `cacheGalleries` also uses, so the two
+    /// can never both miss the same GID and insert it twice.
+    @discardableResult
+    func updateGallery(gid: String, key: String, value: Any?) async -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return await upsertGallery(gid: gid) { $0.setValue(value, forKeyPath: key) }
     }
-    @MainActor func updateLastOpenDate(gid: String, date: Date = .now) {
-        guard gid.isValidGID else { return }
-        updateGallery(gid: gid, key: "lastOpenDate", value: date)
+    @discardableResult
+    func updateLastOpenDate(gid: String, date: Date = .now) async -> Result<Void, AppError> {
+        await updateGallery(gid: gid, key: "lastOpenDate", value: date)
     }
-    @MainActor func clearHistoryGalleries() {
-        let predicate = NSPredicate(format: "lastOpenDate != nil")
-        batchUpdate(entityType: GalleryMO.self, predicate: predicate) { galleryMOs in
-            galleryMOs.forEach { galleryMO in
-                galleryMO.lastOpenDate = nil
+    @discardableResult
+    func clearHistoryGalleries() async -> Result<Void, AppError> {
+        let context = PersistenceController.shared.backgroundContext
+        return await context.perform {
+            let request = NSFetchRequest<GalleryMO>(entityName: "GalleryMO")
+            request.predicate = NSPredicate(format: "lastOpenDate != nil")
+            request.fetchBatchSize = Self.fetchBatchSize
+            do {
+                for galleryMO in try context.fetch(request) {
+                    galleryMO.lastOpenDate = nil
+                }
+            } catch {
+                Logger.error("Failed in clearing history galleries.", context: ["error": error])
+                context.reset()
+                return .failure(.databaseUnavailable("\(error)"))
             }
+            let result = Self.save(context)
+            context.reset()
+            return result
         }
     }
-    @MainActor func cacheGalleries(_ galleries: [Gallery]) {
-        for gallery in galleries.filter({ $0.id.isValidGID }) {
-            let storedMO = fetch(
-                entityType: GalleryMO.self, gid: gallery.gid
-            ) { managedObject in
-                managedObject?.category = gallery.category.rawValue
-                managedObject?.coverURL = gallery.coverURL
-                managedObject?.galleryURL = gallery.galleryURL
-                // managedObject?.lastOpenDate = gallery.lastOpenDate
-                managedObject?.pageCount = Int64(gallery.pageCount)
-                managedObject?.postedDate = gallery.postedDate
-                managedObject?.rating = gallery.rating
-                managedObject?.tags = gallery.tags.toData()
-                managedObject?.title = gallery.title
-                managedObject?.token = gallery.token
+    /// Upserts a whole page of results with a single indexed `IN` fetch and a single save
+    /// on the serialized background context, instead of one main queue fetch per result.
+    @discardableResult
+    func cacheGalleries(_ galleries: [Gallery]) async -> Result<Void, AppError> {
+        let galleries = galleries.filter { $0.id.isValidGID }
+        guard !galleries.isEmpty else { return .success(()) }
+        let context = PersistenceController.shared.backgroundContext
+        return await context.perform {
+            let request = NSFetchRequest<GalleryMO>(entityName: "GalleryMO")
+            request.predicate = NSPredicate(format: "gid IN %@", galleries.map(\.gid))
+            let storedMOs: [GalleryMO]
+            do {
+                storedMOs = try context.fetch(request)
+            } catch {
+                Logger.error("Failed in fetching cached galleries.", context: ["error": error])
+                context.reset()
+                return .failure(.databaseUnavailable("\(error)"))
+            }
+            var galleryMOs = [String: [GalleryMO]](grouping: storedMOs, by: \.gid)
+                .compactMapValues { Self.mergeDuplicates($0, in: context) }
+            for gallery in galleries {
+                guard let galleryMO = galleryMOs[gallery.gid] else {
+                    galleryMOs[gallery.gid] = gallery.toManagedObject(in: context)
+                    continue
+                }
+                galleryMO.category = gallery.category.rawValue
+                galleryMO.coverURL = gallery.coverURL
+                galleryMO.galleryURL = gallery.galleryURL
+                // galleryMO.lastOpenDate = gallery.lastOpenDate
+                galleryMO.pageCount = Int64(gallery.pageCount)
+                galleryMO.postedDate = gallery.postedDate
+                galleryMO.rating = gallery.rating
+                galleryMO.tags = gallery.tags.toData()
+                galleryMO.title = gallery.title
+                galleryMO.token = gallery.token
                 if let uploader = gallery.uploader {
-                    managedObject?.uploader = uploader
+                    galleryMO.uploader = uploader
                 }
             }
-            if storedMO == nil {
-                gallery.toManagedObject(in: PersistenceController.shared.container.viewContext)
-            }
+            let result = Self.save(context)
+            context.reset()
+            return result
         }
-        saveContext()
     }
 }
 
 // MARK: UpdateGalleryDetail
 extension DatabaseClient {
-    @MainActor func cacheGalleryDetail(_ detail: GalleryDetail) {
-        guard detail.gid.isValidGID else { return }
-        let storedMO = fetch(
-            entityType: GalleryDetailMO.self, gid: detail.gid
-        ) { managedObject in
-            managedObject?.archiveURL = detail.archiveURL
-            managedObject?.category = detail.category.rawValue
-            managedObject?.coverURL = detail.coverURL
-            managedObject?.isFavorited = detail.isFavorited
-            managedObject?.visibility = detail.visibility.toData()
-            managedObject?.jpnTitle = detail.jpnTitle
-            managedObject?.language = detail.language.rawValue
-            managedObject?.favoritedCount = Int64(detail.favoritedCount)
-            managedObject?.pageCount = Int64(detail.pageCount)
-            managedObject?.parentURL = detail.parentURL
-            managedObject?.postedDate = detail.postedDate
-            managedObject?.rating = detail.rating
-            managedObject?.userRating = detail.userRating
-            managedObject?.ratingCount = Int64(detail.ratingCount)
-            managedObject?.sizeCount = detail.sizeCount
-            managedObject?.sizeType = detail.sizeType
-            managedObject?.title = detail.title
-            managedObject?.torrentCount = Int64(detail.torrentCount)
-            managedObject?.uploader = detail.uploader
+    @discardableResult
+    @MainActor func cacheGalleryDetail(_ detail: GalleryDetail) -> Result<Void, AppError> {
+        guard detail.gid.isValidGID else { return .success(()) }
+        return update(entityType: GalleryDetailMO.self, gid: detail.gid, createIfNil: true) { managedObject in
+            managedObject.archiveURL = detail.archiveURL
+            managedObject.category = detail.category.rawValue
+            managedObject.coverURL = detail.coverURL
+            managedObject.isFavorited = detail.isFavorited
+            managedObject.visibility = detail.visibility.toData()
+            managedObject.jpnTitle = detail.jpnTitle
+            managedObject.language = detail.language.rawValue
+            managedObject.favoritedCount = Int64(detail.favoritedCount)
+            managedObject.pageCount = Int64(detail.pageCount)
+            managedObject.parentURL = detail.parentURL
+            managedObject.postedDate = detail.postedDate
+            managedObject.rating = detail.rating
+            managedObject.userRating = detail.userRating
+            managedObject.ratingCount = Int64(detail.ratingCount)
+            managedObject.sizeCount = detail.sizeCount
+            managedObject.sizeType = detail.sizeType
+            managedObject.title = detail.title
+            managedObject.torrentCount = Int64(detail.torrentCount)
+            managedObject.uploader = detail.uploader
         }
-        if storedMO == nil {
-            detail.toManagedObject(in: PersistenceController.shared.container.viewContext)
-        }
-        saveContext()
     }
 }
 
 // MARK: UpdateGalleryState
 extension DatabaseClient {
-    @MainActor func updateGalleryState(gid: String, commitChanges: @escaping (GalleryStateMO) -> Void) {
-        guard gid.isValidGID else { return }
-        update(
+    @discardableResult
+    @MainActor func updateGalleryState(
+        gid: String, commitChanges: @escaping (GalleryStateMO) -> Void
+    ) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return update(
             entityType: GalleryStateMO.self, gid: gid, createIfNil: true,
             commitChanges: commitChanges
         )
     }
-    @MainActor func updateGalleryState(gid: String, key: String, value: Any?) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid) { stateMO in
+    @discardableResult
+    @MainActor func updateGalleryState(gid: String, key: String, value: Any?) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid) { stateMO in
             stateMO.setValue(value, forKeyPath: key)
         }
     }
-    @MainActor func updateGalleryTags(gid: String, tags: [GalleryTag]) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid, key: "tags", value: tags.toData())
+    @discardableResult
+    @MainActor func updateGalleryTags(gid: String, tags: [GalleryTag]) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid, key: "tags", value: tags.toData())
     }
-    @MainActor func updatePreviewConfig(gid: String, config: PreviewConfig) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid, key: "previewConfig", value: config.toData())
+    @discardableResult
+    @MainActor func updatePreviewConfig(gid: String, config: PreviewConfig) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid, key: "previewConfig", value: config.toData())
     }
-    @MainActor func updateReadingProgress(gid: String, progress: Int) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid, key: "readingProgress", value: Int64(progress))
+    @discardableResult
+    @MainActor func updateReadingProgress(gid: String, progress: Int) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid, key: "readingProgress", value: Int64(progress))
     }
-    @MainActor func updateComments(gid: String, comments: [GalleryComment]) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid, key: "comments", value: comments.toData())
+    @discardableResult
+    @MainActor func updateComments(gid: String, comments: [GalleryComment]) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid, key: "comments", value: comments.toData())
     }
 
-    @MainActor func removeImageURLs(gid: String) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid) { galleryStateMO in
+    @discardableResult
+    @MainActor func removeImageURLs(gid: String) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid) { galleryStateMO in
             galleryStateMO.imageURLs = nil
             galleryStateMO.previewURLs = nil
             galleryStateMO.thumbnailURLs = nil
             galleryStateMO.originalImageURLs = nil
         }
     }
-    @MainActor func removeImageURLs() {
+    @discardableResult
+    @MainActor func removeImageURLs() -> Result<Void, AppError> {
         batchUpdate(entityType: GalleryStateMO.self) { galleryStateMOs in
             galleryStateMOs.forEach { galleryStateMO in
                 galleryStateMO.imageURLs = nil
@@ -378,27 +596,62 @@ extension DatabaseClient {
             }
         }
     }
-    @MainActor func removeExpiredImageURLs() {
-        fetchHistoryGalleries()
-            .filter { Date().timeIntervalSince($0.lastOpenDate ?? .distantPast) > .oneWeek }
-            .forEach { removeImageURLs(gid: $0.id) }
+    /// Startup cleanup: two predicate driven fetches and one background transaction,
+    /// instead of materializing the whole history and saving once per expired row.
+    @discardableResult
+    func removeExpiredImageURLs() async -> Result<Void, AppError> {
+        let expirationDate = Date().addingTimeInterval(-TimeInterval.oneWeek)
+        let context = PersistenceController.shared.backgroundContext
+        return await context.perform {
+            let galleryRequest = NSFetchRequest<NSDictionary>(entityName: "GalleryMO")
+            galleryRequest.resultType = .dictionaryResultType
+            galleryRequest.propertiesToFetch = ["gid"]
+            galleryRequest.predicate = NSPredicate(
+                format: "lastOpenDate != nil AND lastOpenDate < %@", expirationDate as NSDate
+            )
+            let stateRequest = NSFetchRequest<GalleryStateMO>(entityName: "GalleryStateMO")
+            stateRequest.fetchBatchSize = Self.fetchBatchSize
+            do {
+                let gids = try context.fetch(galleryRequest).compactMap { $0["gid"] as? String }
+                guard !gids.isEmpty else { return .success(()) }
+                stateRequest.predicate = NSPredicate(format: "gid IN %@", gids)
+                for galleryStateMO in try context.fetch(stateRequest) {
+                    galleryStateMO.imageURLs = nil
+                    galleryStateMO.previewURLs = nil
+                    galleryStateMO.thumbnailURLs = nil
+                    galleryStateMO.originalImageURLs = nil
+                }
+            } catch {
+                Logger.error("Failed in removing expired image URLs.", context: ["error": error])
+                context.reset()
+                return .failure(.databaseUnavailable("\(error)"))
+            }
+            let result = Self.save(context)
+            context.reset()
+            return result
+        }
     }
-    @MainActor func updateThumbnailURLs(gid: String, thumbnailURLs: [Int: URL]) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid) { galleryStateMO in
+    @discardableResult
+    @MainActor func updateThumbnailURLs(gid: String, thumbnailURLs: [Int: URL]) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid) { galleryStateMO in
             update(gid: gid, storedData: &galleryStateMO.thumbnailURLs, new: thumbnailURLs)
         }
     }
-    @MainActor func updateImageURLs(gid: String, imageURLs: [Int: URL], originalImageURLs: [Int: URL]) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid) { galleryStateMO in
+    @discardableResult
+    @MainActor func updateImageURLs(
+        gid: String, imageURLs: [Int: URL], originalImageURLs: [Int: URL]
+    ) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid) { galleryStateMO in
             update(gid: gid, storedData: &galleryStateMO.imageURLs, new: imageURLs)
             update(gid: gid, storedData: &galleryStateMO.originalImageURLs, new: originalImageURLs)
         }
     }
-    @MainActor func updatePreviewURLs(gid: String, previewURLs: [Int: URL]) {
-        guard gid.isValidGID else { return }
-        updateGalleryState(gid: gid) { galleryStateMO in
+    @discardableResult
+    @MainActor func updatePreviewURLs(gid: String, previewURLs: [Int: URL]) -> Result<Void, AppError> {
+        guard gid.isValidGID else { return .success(()) }
+        return updateGalleryState(gid: gid) { galleryStateMO in
             update(gid: gid, storedData: &galleryStateMO.previewURLs, new: previewURLs)
         }
     }
@@ -420,16 +673,19 @@ extension DatabaseClient {
 
 // MARK: UpdateAppEnv
 extension DatabaseClient {
-    @MainActor func updateAppEnv(key: String, value: Any?) {
+    @discardableResult
+    @MainActor func updateAppEnv(key: String, value: Any?) -> Result<Void, AppError> {
         update(
             entityType: AppEnvMO.self, createIfNil: true,
             commitChanges: { $0.setValue(value, forKeyPath: key) }
         )
     }
-    @MainActor func updateSetting(_ setting: Setting) {
+    @discardableResult
+    @MainActor func updateSetting(_ setting: Setting) -> Result<Void, AppError> {
         updateAppEnv(key: "setting", value: setting.toData())
     }
-    @MainActor func updateFilter(_ filter: Filter, range: FilterRange) {
+    @discardableResult
+    @MainActor func updateFilter(_ filter: Filter, range: FilterRange) -> Result<Void, AppError> {
         let key: String
         switch range {
         case .search:
@@ -439,33 +695,42 @@ extension DatabaseClient {
         case .watched:
             key = "watchedFilter"
         }
-        updateAppEnv(key: key, value: filter.toData())
+        return updateAppEnv(key: key, value: filter.toData())
     }
-    @MainActor func updateTagTranslator(_ tagTranslator: TagTranslator) {
+    @discardableResult
+    @MainActor func updateTagTranslator(_ tagTranslator: TagTranslator) -> Result<Void, AppError> {
         updateAppEnv(key: "tagTranslator", value: tagTranslator.toData())
     }
-    @MainActor func updateUser(_ user: User) {
+    @discardableResult
+    @MainActor func updateUser(_ user: User) -> Result<Void, AppError> {
         updateAppEnv(key: "user", value: user.toData())
     }
-    @MainActor func updateHistoryKeywords(_ keywords: [String]) {
+    @discardableResult
+    @MainActor func updateHistoryKeywords(_ keywords: [String]) -> Result<Void, AppError> {
         updateAppEnv(key: "historyKeywords", value: keywords.toData())
     }
-    @MainActor func updateQuickSearchWords(_ words: [QuickSearchWord]) {
+    @discardableResult
+    @MainActor func updateQuickSearchWords(_ words: [QuickSearchWord]) -> Result<Void, AppError> {
         updateAppEnv(key: "quickSearchWords", value: words.toData())
     }
 
     // Update User
-    @MainActor func updateUserProperty(_ commitChanges: @escaping (inout User) -> Void) {
+    @discardableResult
+    @MainActor func updateUserProperty(
+        _ commitChanges: @escaping (inout User) -> Void
+    ) -> Result<Void, AppError> {
         var user = fetchAppEnv().user
         commitChanges(&user)
-        updateUser(user)
+        return updateUser(user)
     }
-    @MainActor func updateGreeting(_ greeting: Greeting) {
+    @discardableResult
+    @MainActor func updateGreeting(_ greeting: Greeting) -> Result<Void, AppError> {
         updateUserProperty { user in
             user.greeting = greeting
         }
     }
-    @MainActor func updateGalleryFunds(galleryPoints: String, credits: String) {
+    @discardableResult
+    @MainActor func updateGalleryFunds(galleryPoints: String, credits: String) -> Result<Void, AppError> {
         updateUserProperty { user in
             user.credits = credits
             user.galleryPoints = galleryPoints
@@ -492,7 +757,7 @@ extension DatabaseClient {
     static let noop: Self = .init(
         prepareDatabase: { .success(()) },
         dropDatabase: { .success(()) },
-        saveContext: {},
+        saveContext: { .success(()) },
         materializedObjects: { _, _ in .init() }
     )
 

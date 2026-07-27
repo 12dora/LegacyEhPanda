@@ -12,6 +12,7 @@ enum AppError: Error, Identifiable, Equatable, Hashable {
     var id: String { localizedDescription }
 
     case databaseCorrupted(String?)
+    case databaseUnavailable(String?)
     case copyrightClaim(String)
     case ipBanned(BanInterval)
     case expunged(String)
@@ -24,9 +25,35 @@ enum AppError: Error, Identifiable, Equatable, Hashable {
 }
 
 extension AppError {
+    /// Classifies a persistent store failure. Only a damaged store is recoverable by
+    /// dropping the database; locked, read-only, full or otherwise unavailable storage is
+    /// transient, and offering the destructive recovery for it invites needless data loss.
+    static func database(_ error: Error, context: String? = nil) -> AppError {
+        if let appError = error as? AppError {
+            return appError
+        }
+        let error = error as NSError
+        var lines = [String]()
+        if let context = context {
+            lines.append(context)
+        }
+        lines.append("\(error.domain) \(error.code): \(error.localizedDescription)")
+        let message = lines.joined(separator: " ")
+
+        guard error.domain == NSCocoaErrorDomain else { return .databaseUnavailable(message) }
+        // `NSFileReadCorruptFileError`, the store type/schema mismatches
+        // (`NSPersistentStoreInvalidTypeError` ... `NSPersistentStoreIncompatibleSchemaError`)
+        // and the migration failures (`NSPersistentStoreIncompatibleVersionHashError`
+        // ... `NSExternalRecordImportError`) are the only classes that dropping can fix.
+        let isCorrupted = error.code == CocoaError.Code.fileReadCorruptFile.rawValue
+        || (134000...134020).contains(error.code)
+        || (134100...134200).contains(error.code)
+        return isCorrupted ? .databaseCorrupted(message) : .databaseUnavailable(message)
+    }
+
     var isRetryable: Bool {
         switch self {
-        case .databaseCorrupted, .ipBanned, .networkingFailed, .parseFailed,
+        case .databaseCorrupted, .databaseUnavailable, .ipBanned, .networkingFailed, .parseFailed,
                 .noUpdates, .notFound, .unknown, .webImageFailed:
             return true
         case .copyrightClaim, .expunged:
@@ -37,6 +64,8 @@ extension AppError {
         switch self {
         case .databaseCorrupted:
             return "Database Corrupted"
+        case .databaseUnavailable:
+            return "Database Unavailable"
         case .copyrightClaim:
             return "Copyright Claim"
         case .ipBanned:
@@ -61,6 +90,8 @@ extension AppError {
         switch self {
         case .databaseCorrupted:
             return .exclamationmarkTriangleFill
+        case .databaseUnavailable:
+            return .exclamationmarkArrowTriangle2Circlepath
         case .ipBanned:
             return .networkBadgeShieldHalfFilled
         case .copyrightClaim, .expunged:
@@ -78,6 +109,12 @@ extension AppError {
         switch self {
         case .databaseCorrupted(let reason):
             var lines = [L10n.Localizable.ErrorView.Title.databaseCorrupted]
+            if let reason = reason {
+                lines.append("(\(reason))")
+            }
+            return lines.joined(separator: "\n")
+        case .databaseUnavailable(let reason):
+            var lines = [tryLater]
             if let reason = reason {
                 lines.append("(\(reason))")
             }
