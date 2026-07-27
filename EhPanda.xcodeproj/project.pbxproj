@@ -74,6 +74,7 @@
 		AB31CD3F27B670FD00F40E0A /* GalleryNormalImageURL.html in Resources */ = {isa = PBXBuildFile; fileRef = AB31CD3E27B670FD00F40E0A /* GalleryNormalImageURL.html */; };
 		AB31CD4127B6769F00F40E0A /* GalleryMPVKeys.html in Resources */ = {isa = PBXBuildFile; fileRef = AB31CD4027B6769F00F40E0A /* GalleryMPVKeys.html */; };
 		AB31CD4327B676C300F40E0A /* GalleryMPVKeysParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB31CD4227B676C300F40E0A /* GalleryMPVKeysParserTests.swift */; };
+		C0D300000000000000000102 /* CoverageGapBehaviorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300000000000000000101 /* CoverageGapBehaviorTests.swift */; };
 		AB358311269D7B63009466A5 /* DFURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB358310269D7B63009466A5 /* DFURLProtocol.swift */; };
 		AB358313269D7E89009466A5 /* DFRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB358312269D7E89009466A5 /* DFRequest.swift */; };
 		AB358315269D821D009466A5 /* DFExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB358314269D821D009466A5 /* DFExtensions.swift */; };
@@ -366,6 +367,7 @@
 		AB31CD3E27B670FD00F40E0A /* GalleryNormalImageURL.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = GalleryNormalImageURL.html; sourceTree = "<group>"; };
 		AB31CD4027B6769F00F40E0A /* GalleryMPVKeys.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = GalleryMPVKeys.html; sourceTree = "<group>"; };
 		AB31CD4227B676C300F40E0A /* GalleryMPVKeysParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryMPVKeysParserTests.swift; sourceTree = "<group>"; };
+		C0D300000000000000000101 /* CoverageGapBehaviorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageGapBehaviorTests.swift; sourceTree = "<group>"; };
 		AB358310269D7B63009466A5 /* DFURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DFURLProtocol.swift; sourceTree = "<group>"; };
 		AB358312269D7E89009466A5 /* DFRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DFRequest.swift; sourceTree = "<group>"; };
 		AB358314269D821D009466A5 /* DFExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DFExtensions.swift; sourceTree = "<group>"; };
@@ -1076,9 +1078,18 @@
 		ABA12F2E27D49AD10021922D /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				C0D300000000000000000100 /* Behavior */,
 				ABD9770C27B65A5300983DE7 /* Parser */,
 			);
 			path = Tests;
+			sourceTree = "<group>";
+		};
+		C0D300000000000000000100 /* Behavior */ = {
+			isa = PBXGroup;
+			children = (
+				C0D300000000000000000101 /* CoverageGapBehaviorTests.swift */,
+			);
+			path = Behavior;
 			sourceTree = "<group>";
 		};
 		ABA9A6C028EC7BD000EE28DE /* Generated */ = {
@@ -1967,6 +1978,7 @@
 			files = (
 				AB31CD3D27B66F7D00F40E0A /* GalleryImageURLParserTests.swift in Sources */,
 				AB0CFB8227BBBFCE004BD372 /* EhSettingParserTests.swift in Sources */,
+				C0D300000000000000000102 /* CoverageGapBehaviorTests.swift in Sources */,
 				AB31CD4327B676C300F40E0A /* GalleryMPVKeysParserTests.swift in Sources */,
 				AB31CD3027B666E200F40E0A /* TestError.swift in Sources */,
 				ABD9771027B65E3400983DE7 /* GalleryDetailParserTests.swift in Sources */,

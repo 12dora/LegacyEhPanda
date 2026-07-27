@@ -22,9 +22,9 @@ actor ReaderImageDataCache {
     private let fileManager: FileManager
     private var bytesWrittenSinceSweep: UInt64 = 0
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
         self.fileManager = fileManager
-        rootURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        self.rootURL = rootURL ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ReaderImageData", isDirectory: true)
         memoryCache.totalCostLimit = 64 * 1_024 * 1_024
     }
@@ -401,16 +401,25 @@ final class ReaderImagePlaceholderGuard: ImageDownloaderDelegate {
     }
 }
 
-private struct DownloadedReaderImage {
-    let image: UIImage
-    let data: Data
+struct ReaderImageDownloader {
+    let download: (
+        _ url: URL,
+        _ priority: TaskPriority,
+        _ onProgress: (@MainActor (Double) -> Void)?
+    ) async throws -> Data
+
+    static let live = Self { url, priority, onProgress in
+        try await ReaderImagePipeline.download(
+            url: url, priority: priority, onProgress: onProgress
+        )
+    }
 }
 
 actor ReaderImagePipeline {
     static let shared = ReaderImagePipeline()
 
     private struct Transfer {
-        let task: Task<DownloadedReaderImage, Error>
+        let task: Task<Data, Error>
         var waiters: Set<UUID>
     }
 
@@ -428,12 +437,17 @@ actor ReaderImagePipeline {
     }
 
     private let dataCache: ReaderImageDataCache
+    private let downloader: ReaderImageDownloader
     private let decodedCache = NSCache<NSString, UIImage>()
     private let localAssets = NSCache<NSString, LocalAssetEntry>()
     private var transfers = [String: Transfer]()
+#if DEBUG
+    private var waiterCountWaiters = [(key: String, count: Int, continuation: CheckedContinuation<Void, Never>)]()
+#endif
 
-    init(dataCache: ReaderImageDataCache = .shared) {
+    init(dataCache: ReaderImageDataCache = .shared, downloader: ReaderImageDownloader = .live) {
         self.dataCache = dataCache
+        self.downloader = downloader
         decodedCache.totalCostLimit = 96 * 1_024 * 1_024
         localAssets.totalCostLimit = 48 * 1_024 * 1_024
     }
@@ -490,15 +504,17 @@ actor ReaderImagePipeline {
         // Coalesce by the stable page key, not by the absolute URL: a renewed H@H
         // signature produces a different absolute URL for the very same page, and
         // keying by it duplicated the download and the decode.
-        let download = try await transferData(
+        let data = try await transferData(
             for: url, key: primaryKey, priority: priority, onProgress: onProgress
         )
         try Task.checkCancellation()
-        guard !Self.isKnownSitePlaceholder(download.data) else { throw AppError.parseFailed }
-        let image = download.image
-        try? await dataCache.store(download.data, forKey: primaryKey)
-        cacheDecoded(image, data: download.data, key: primaryKey)
-        return ReaderImageAsset(image: image, data: download.data)
+        guard data.looksLikeReaderImageData,
+              !Self.isKnownSitePlaceholder(data),
+              let image = await Self.decode(data, priority: priority)
+        else { throw AppError.parseFailed }
+        try? await dataCache.store(data, forKey: primaryKey)
+        cacheDecoded(image, data: data, key: primaryKey)
+        return ReaderImageAsset(image: image, data: data)
     }
 
     private func cacheDecoded(_ image: UIImage, data: Data, key: String) {
@@ -523,6 +539,27 @@ actor ReaderImagePipeline {
         await dataCache.removeAllMemory()
     }
 
+#if DEBUG
+    func waiterCountForTests(for url: URL) -> Int {
+        transfers[url.readerImageCacheKeys[0]]?.waiters.count ?? 0
+    }
+
+    func waitForWaiterCountForTests(for url: URL, count: Int) async {
+        let key = url.readerImageCacheKeys[0]
+        guard (transfers[key]?.waiters.count ?? 0) != count else { return }
+        await withCheckedContinuation { continuation in
+            waiterCountWaiters.append((key, count, continuation))
+        }
+    }
+
+    private func notifyWaiterCountChanged(for key: String) {
+        let current = transfers[key]?.waiters.count ?? 0
+        let ready = waiterCountWaiters.filter { $0.key == key && current == $0.count }
+        waiterCountWaiters.removeAll { $0.key == key && current == $0.count }
+        ready.forEach { $0.continuation.resume() }
+    }
+#endif
+
     // Canonical path plus the identity-bearing file metadata, so a repaired or
     // re-downloaded page invalidates its entry instead of serving stale bytes.
     private static func localAssetKey(for url: URL) -> String? {
@@ -537,23 +574,27 @@ actor ReaderImagePipeline {
         key: String,
         priority: TaskPriority,
         onProgress: (@MainActor (Double) -> Void)?
-    ) async throws -> DownloadedReaderImage {
+    ) async throws -> Data {
         let waiter = UUID()
-        let task: Task<DownloadedReaderImage, Error>
+        let task: Task<Data, Error>
         if var existing = transfers[key] {
             existing.waiters.insert(waiter)
             transfers[key] = existing
             task = existing.task
         } else {
             task = Task(priority: priority) {
-                try await Self.download(url: url, priority: priority, onProgress: onProgress)
+                try await downloader.download(url, priority, onProgress)
             }
             transfers[key] = Transfer(task: task, waiters: [waiter])
         }
+#if DEBUG
+        notifyWaiterCountChanged(for: key)
+#endif
 
         return try await withTaskCancellationHandler {
             do {
                 let data = try await task.value
+                try Task.checkCancellation()
                 release(waiter: waiter, key: key)
                 return data
             } catch {
@@ -573,6 +614,9 @@ actor ReaderImagePipeline {
         } else {
             transfers[key] = transfer
         }
+#if DEBUG
+        notifyWaiterCountChanged(for: key)
+#endif
     }
 
     private func cancel(waiter: UUID, key: String) {
@@ -584,13 +628,16 @@ actor ReaderImagePipeline {
         } else {
             transfers[key] = transfer
         }
+#if DEBUG
+        notifyWaiterCountChanged(for: key)
+#endif
     }
 
-    private static func download(
+    static func download(
         url: URL,
         priority: TaskPriority,
         onProgress: (@MainActor (Double) -> Void)?
-    ) async throws -> DownloadedReaderImage {
+    ) async throws -> Data {
         var lastError: Error = AppError.networkingFailed
         for attempt in 0..<3 {
             try Task.checkCancellation()
@@ -613,15 +660,14 @@ actor ReaderImagePipeline {
         url: URL,
         priority: TaskPriority,
         onProgress: (@MainActor (Double) -> Void)?
-    ) async throws -> DownloadedReaderImage {
+    ) async throws -> Data {
         let holder = ReaderImageDownloadTaskHolder()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 holder.task = KingfisherManager.shared.downloader.downloadImage(
                     with: url,
                     options: [
-                        .processor(WebPProcessor.default),
-                        .backgroundDecode,
+                        .processor(ReaderBytesOnlyProcessor.default),
                         .downloadPriority(priority == .utility ? 0.25 : URLSessionTask.highPriority),
                         .callbackQueue(.untouch)
                     ],
@@ -634,10 +680,7 @@ actor ReaderImagePipeline {
                     completionHandler: { result in
                         switch result {
                         case .success(let value):
-                            continuation.resume(returning: DownloadedReaderImage(
-                                image: value.image,
-                                data: value.originalData
-                            ))
+                            continuation.resume(returning: value.originalData)
                         case .failure(let error):
                             continuation.resume(throwing: error)
                         }

@@ -325,7 +325,8 @@ private struct BencodeValidator {
         while let byte = peek(), (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) { index += 1 }
 
         guard index > digitsStart, index - digitsStart <= 10,
-              let length = Int(String(decoding: bytes[digitsStart..<index], as: UTF8.self)),
+              let lengthString = String(bytes: bytes[digitsStart..<index], encoding: .utf8),
+              let length = Int(lengthString),
               consume(UInt8(ascii: ":")), bytes.count - index >= length
         else { return nil }
 
@@ -1061,8 +1062,36 @@ struct DataRequest: Request {
     /// never be saved and shared as a `.torrent` file. Turn off for non-torrent payloads.
     var requiresBencodedPayload = true
 
+#if DEBUG
+    private static let transportLock = NSLock()
+    private static var transportOverride: ((URL) -> AnyPublisher<URLSession.DataTaskPublisher.Output, URLError>)?
+
+    static func setTransportForTests(
+        _ override: ((URL) -> AnyPublisher<URLSession.DataTaskPublisher.Output, URLError>)?
+    ) {
+        transportLock.lock()
+        transportOverride = override
+        transportLock.unlock()
+    }
+
+    private static func transportPublisher(
+        for url: URL
+    ) -> AnyPublisher<URLSession.DataTaskPublisher.Output, URLError> {
+        transportLock.lock()
+        let override = transportOverride
+        transportLock.unlock()
+        if let override { return override(url) }
+        return URLSession.shared.dataTaskPublisher(for: url).eraseToAnyPublisher()
+    }
+#endif
+
     var publisher: AnyPublisher<Data, AppError> {
-        URLSession.shared.dataTaskPublisher(for: url)
+#if DEBUG
+        let transport = Self.transportPublisher(for: url)
+#else
+        let transport = URLSession.shared.dataTaskPublisher(for: url).eraseToAnyPublisher()
+#endif
+        return transport
             .genericRetry()
             .tryMap(validateHTTPResponse)
             .map(\.data)

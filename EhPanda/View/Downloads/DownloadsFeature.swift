@@ -116,7 +116,27 @@ private enum DownloadPaths {
     static let stagingName = "Staging"
     static let quarantineName = "Quarantine"
 
+#if DEBUG
+    private static let testRootLock = NSLock()
+    private static var testRoot: URL?
+
+    static func setTestRoot(_ root: URL?) {
+        testRootLock.lock()
+        testRoot = root
+        testRootLock.unlock()
+    }
+
+    static func currentTestRoot() -> URL? {
+        testRootLock.lock()
+        defer { testRootLock.unlock() }
+        return testRoot
+    }
+#endif
+
     static var root: URL {
+#if DEBUG
+        if let testRoot = currentTestRoot() { return testRoot }
+#endif
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("EhPandaDownloads", isDirectory: true)
@@ -336,6 +356,11 @@ private actor DownloadPersistence {
     }
 
     func saveFolders(_ folders: [String]) {
+#if DEBUG
+        if let saveFoldersHookForTests {
+            saveFoldersHookForTests(folders)
+        }
+#endif
         guard let data = try? JSONEncoder().encode(folders) else { return }
         try? fileManager.createDirectory(at: DownloadPaths.root, withIntermediateDirectories: true)
         try? data.write(to: DownloadPaths.folders, options: .atomic)
@@ -431,6 +456,241 @@ private actor DownloadPersistence {
         return destination
     }
 }
+
+#if DEBUG
+private var saveFoldersHookForTests: (([String]) -> Void)?
+
+enum DownloadPersistenceTestSupport {
+    struct Snapshot: Equatable {
+        let downloads: [GalleryDownload]
+        let folders: [String]
+        let quarantinedCount: Int
+        let unsupportedCount: Int
+        let isComplete: Bool
+    }
+
+    enum PromotionOutcome: Equatable {
+        case success(String)
+        case failure(String)
+    }
+
+    static func useRoot(_ root: URL) {
+        DownloadPaths.setTestRoot(root)
+    }
+
+    static func resetRoot() {
+        DownloadPaths.setTestRoot(nil)
+    }
+
+    static func rootURL() -> URL {
+        DownloadPaths.root
+    }
+
+    static func galleryDirectory(_ gid: String) -> URL {
+        DownloadPaths.galleryDirectory(gid)
+    }
+
+    static func manifestURL(_ gid: String) -> URL {
+        DownloadPaths.manifest(gid)
+    }
+
+    static func quarantineURL() -> URL {
+        DownloadPaths.root.appendingPathComponent(DownloadPaths.quarantineName, isDirectory: true)
+    }
+
+    static func load() async -> Snapshot {
+        let snapshot = await DownloadPersistence.shared.load()
+        return Snapshot(
+            downloads: snapshot.downloads,
+            folders: snapshot.folders,
+            quarantinedCount: snapshot.quarantinedCount,
+            unsupportedCount: snapshot.unsupportedCount,
+            isComplete: snapshot.isComplete
+        )
+    }
+
+    static func commit(_ download: GalleryDownload) async throws {
+        try await DownloadPersistence.shared.commit(download)
+    }
+
+    static func saveFolders(_ folders: [String]) async {
+        await DownloadPersistence.shared.saveFolders(folders)
+    }
+
+    static func setSaveFoldersHook(_ hook: (([String]) -> Void)?) {
+        saveFoldersHookForTests = hook
+    }
+
+    static func pendingIndices(gid: String, pageCount: Int, fileNames: [Int: String]) async -> [Int] {
+        await DownloadPersistence.shared.pendingIndices(gid: gid, pageCount: pageCount, fileNames: fileNames)
+    }
+
+    static func existingFileNames(gid: String, fileNames: [Int: String]) async -> [Int: String] {
+        await DownloadPersistence.shared.existingFileNames(gid: gid, fileNames: fileNames)
+    }
+
+    static func promote(
+        staged: URL, gid: String, index: Int, fileExtension: String, generation: UUID
+    ) async -> PromotionOutcome {
+        do {
+            let fileName = try await DownloadPersistence.shared.promote(
+                staged: staged,
+                gid: gid,
+                index: index,
+                fileExtension: fileExtension,
+                generation: generation
+            )
+            return .success(fileName)
+        } catch {
+            return .failure(describeDownloadError(error))
+        }
+    }
+
+    static func deleteGallery(gid: String) async {
+        await DownloadPersistence.shared.deleteGallery(gid: gid)
+    }
+
+    static func deletePageFiles(gid: String) async {
+        await DownloadPersistence.shared.deletePageFiles(gid: gid)
+    }
+
+    static func validatePage(
+        _ data: Data, statusCode: Int?, mimeType: String?, expectedLength: Int64
+    ) -> PromotionOutcome {
+        do {
+            return .success(try PageValidator.validate(
+                data,
+                statusCode: statusCode,
+                mimeType: mimeType,
+                expectedLength: expectedLength
+            ))
+        } catch {
+            return .failure(describeDownloadError(error))
+        }
+    }
+}
+
+@MainActor
+enum DownloadManagerTestSupport {
+    static func reset() async -> Bool {
+        await DownloadManager.shared.resetForTests()
+    }
+
+    static func downloads() -> [GalleryDownload] {
+        DownloadManager.shared.downloadsForTests()
+    }
+
+    static func folders() -> [String] {
+        DownloadManager.shared.foldersForTests()
+    }
+
+    static func hasFolderSaveTask() -> Bool {
+        DownloadManager.shared.hasFolderSaveTaskForTests()
+    }
+
+    static func installResetFolderSaveDrainHook(_ hook: (() -> Void)?) {
+        DownloadManager.shared.installResetFolderSaveDrainHookForTests(hook)
+    }
+
+    static func restore() async {
+        await DownloadManager.shared.restoreForTests()
+    }
+
+    static func completeDownloadedPage(
+        gid: String,
+        index: Int,
+        generation: UUID,
+        data: Data,
+        statusCode: Int = 200,
+        mimeType: String = "image/png",
+        expectedLength: Int64? = nil
+    ) async -> String? {
+        await DownloadManager.shared.completeDownloadedPageForTests(
+            gid: gid,
+            index: index,
+            generation: generation,
+            data: data,
+            statusCode: statusCode,
+            mimeType: mimeType,
+            expectedLength: expectedLength
+        )
+    }
+
+    static func completeDownloadedPages(
+        gid: String,
+        generation: UUID,
+        pages: [Int: (url: URL, data: Data)]
+    ) async -> [Int: String?] {
+        await DownloadManager.shared.completeDownloadedPagesForTests(
+            gid: gid,
+            generation: generation,
+            pages: pages
+        )
+    }
+
+    static func adoptExistingTransfers(_ transfers: [TransferInventory], restorationIsComplete: Bool) async {
+        await DownloadManager.shared.adoptExistingTransfersForTests(
+            transfers,
+            restorationIsComplete: restorationIsComplete
+        )
+    }
+
+    static func activeTransferIndices(gid: String) -> [Int] {
+        DownloadManager.shared.activeTransferIndicesForTests(gid: gid)
+    }
+
+    static func installTransferScheduler(
+        _ scheduler: (@MainActor (URLRequest, String) -> Void)?
+    ) {
+        DownloadManager.shared.installTransferSchedulerForTests(scheduler)
+    }
+
+    static func completeScheduledTransfer(
+        taskDescription: String,
+        responseURL: URL,
+        data: Data,
+        statusCode: Int = 200,
+        mimeType: String = "image/png"
+    ) async -> String? {
+        await DownloadManager.shared.completeScheduledTransferForTests(
+            taskDescription: taskDescription,
+            responseURL: responseURL,
+            data: data,
+            statusCode: statusCode,
+            mimeType: mimeType
+        )
+    }
+
+    static func reconcile(gid: String, generation: UUID) async {
+        await DownloadManager.shared.reconcileForTests(gid: gid, generation: generation)
+    }
+
+    static func localPageURLs(gid: String) -> [Int: URL] {
+        DownloadManager.shared.localPageURLsForTests(gid: gid)
+    }
+
+    final class TransferInventory {
+        let taskDescription: String?
+        private(set) var cancelCount = 0
+
+        var isCancelled: Bool { cancelCount > 0 }
+
+        init(gid: String, index: Int, generation: UUID) {
+            taskDescription = DownloadManager.testTaskDescription(
+                gid: gid, index: index, generation: generation
+            )
+        }
+
+        init(taskDescription: String?) {
+            self.taskDescription = taskDescription
+        }
+
+        fileprivate func cancel() {
+            cancelCount += 1
+        }
+    }
+}
+#endif
 
 private enum PageValidationError: Error {
     case missingResponse
@@ -562,6 +822,26 @@ private final class PendingDelegateWork: @unchecked Sendable {
 }
 
 private let pendingDelegateWork = PendingDelegateWork()
+private let pendingBackgroundEventWork = PendingDelegateWork()
+
+private protocol DownloadTransferControlling {
+    var taskDescription: String? { get }
+    func cancel()
+}
+
+private struct URLSessionDownloadTransferController: DownloadTransferControlling {
+    let task: URLSessionTask
+
+    var taskDescription: String? { task.taskDescription }
+
+    func cancel() {
+        task.cancel()
+    }
+}
+
+#if DEBUG
+extension DownloadManagerTestSupport.TransferInventory: DownloadTransferControlling {}
+#endif
 
 private func describeDownloadError(_ error: Error) -> String {
     if let appError = error as? AppError { return appError.localizedDescription }
@@ -627,17 +907,31 @@ final class DownloadManager: NSObject, ObservableObject {
     // trusted it computed zero free slots and left pending pages with nothing to wake them.
     private var activeTransfers = [String: Set<Int>]()
     private var checkpointTasks = [String: Task<Void, Never>]()
+    private var folderSaveTask: Task<Void, Never>?
+    private var folderSaveGeneration: UInt64 = 0
     private var thumbnailCache = [String: [Int: [Int: URL]]]()
     private var mpvKeyCache = [String: (String, [Int: String])]()
     // Bumped on every published mutation so a durable write that was in flight can tell
     // whether the state it wrote is still the state the app is showing.
     private var stateRevisions = [String: UInt64]()
     private var restoreTask: Task<Void, Never>?
+    private var initialRestoreTask: Task<Void, Never>?
     private var restorationIsIncomplete = false
     private var backgroundCompletionHandler: (() -> Void)?
+    private let sessionDelegateQueue: OperationQueue
     private var session: URLSession!
+#if DEBUG
+    private var isResettingForTests = false
+    private var transferSchedulerForTests: ((URLRequest, String) -> Void)?
+    private var scheduledTransferURLsForTests = [String: URL]()
+    private var resetFolderSaveDrainHookForTests: (() -> Void)?
+#endif
 
     override private init() {
+        let delegateQueue = OperationQueue()
+        delegateQueue.name = "com.ehpanda.legacy.gallery-downloads.delegate"
+        delegateQueue.maxConcurrentOperationCount = 1
+        sessionDelegateQueue = delegateQueue
         super.init()
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.httpCookieStorage = .shared
@@ -645,19 +939,225 @@ final class DownloadManager: NSObject, ObservableObject {
         configuration.isDiscretionary = false
         configuration.waitsForConnectivity = true
         configuration.allowsCellularAccess = true
-        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
         // Interrupted downloads still resume without the user opening the tab, but the scan
         // itself now happens at a low priority on the persistence actor rather than inline.
-        Task(priority: .utility) { [weak self] in
+        initialRestoreTask = Task(priority: .utility) { [weak self] in
             await self?.restore()
         }
     }
+
+#if DEBUG
+    func resetForTests() async -> Bool {
+        isResettingForTests = true
+        defer { isResettingForTests = false }
+
+        let resolverTasks = resolvers.values.map(\.task)
+        resolverTasks.forEach { $0.cancel() }
+        for task in resolverTasks { await task.value }
+        let pendingCheckpoints = checkpointTasks.values
+        pendingCheckpoints.forEach { $0.cancel() }
+        for task in pendingCheckpoints { await task.value }
+        resetFolderSaveDrainHookForTests?()
+        await folderSaveTask?.value
+        let currentRestoreTask = restoreTask
+        currentRestoreTask?.cancel()
+        await currentRestoreTask?.value
+        let currentInitialRestoreTask = initialRestoreTask
+        currentInitialRestoreTask?.cancel()
+        await currentInitialRestoreTask?.value
+
+        guard await cancelAndDrainSessionTasksForTests() else { return false }
+
+        resolvers = [:]
+        pendingPumps = []
+        pageFailures = [:]
+        pageAttempts = [:]
+        pagesAwaitingCommit = [:]
+        activeTransfers = [:]
+        checkpointTasks = [:]
+        folderSaveTask = nil
+        folderSaveGeneration = 0
+        thumbnailCache = [:]
+        mpvKeyCache = [:]
+        stateRevisions = [:]
+        restoreTask = nil
+        initialRestoreTask = nil
+        restorationIsIncomplete = false
+        backgroundCompletionHandler = nil
+        transferSchedulerForTests = nil
+        scheduledTransferURLsForTests = [:]
+        resetFolderSaveDrainHookForTests = nil
+        downloads = []
+        folders = [Self.defaultFolder]
+        storageFailure = nil
+        return true
+    }
+
+    func downloadsForTests() -> [GalleryDownload] {
+        downloads
+    }
+
+    func foldersForTests() -> [String] {
+        folders
+    }
+
+    func hasFolderSaveTaskForTests() -> Bool {
+        folderSaveTask != nil
+    }
+
+    func installResetFolderSaveDrainHookForTests(_ hook: (() -> Void)?) {
+        resetFolderSaveDrainHookForTests = hook
+    }
+
+    func restoreForTests() async {
+        await restore()
+    }
+
+    func completeDownloadedPageForTests(
+        gid: String,
+        index: Int,
+        generation: UUID,
+        data: Data,
+        statusCode: Int = 200,
+        mimeType: String = "image/png",
+        expectedLength: Int64? = nil
+    ) async -> String? {
+        let temporaryURL = DownloadPaths.root
+            .appendingPathComponent("test-\(UUID().uuidString)", isDirectory: false)
+        do {
+            try FileManager.default.createDirectory(at: DownloadPaths.root, withIntermediateDirectories: true)
+            try data.write(to: temporaryURL, options: .atomic)
+            let response = HTTPURLResponse(
+                url: URL(string: "https://downloads.test/\(gid)/\(index)")!,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": mimeType]
+            )
+            return await processActiveFinishedDownloadForTests(
+                taskDescription: Self.makeTaskDescription(gid: gid, index: index, generation: generation),
+                response: response,
+                expectedLength: expectedLength ?? Int64(data.count),
+                location: temporaryURL
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            return describeDownloadError(error)
+        }
+    }
+
+    func completeDownloadedPagesForTests(
+        gid: String,
+        generation: UUID,
+        pages: [Int: (url: URL, data: Data)]
+    ) async -> [Int: String?] {
+        var outcomes = [Int: String?]()
+        for index in pages.keys.sorted() {
+            guard let page = pages[index] else { continue }
+            let temporaryURL = DownloadPaths.root
+                .appendingPathComponent("test-\(UUID().uuidString)", isDirectory: false)
+            do {
+                try FileManager.default.createDirectory(at: DownloadPaths.root, withIntermediateDirectories: true)
+                try page.data.write(to: temporaryURL, options: .atomic)
+                let response = HTTPURLResponse(
+                    url: page.url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "image/png"]
+                )
+                outcomes[index] = await processActiveFinishedDownloadForTests(
+                    taskDescription: Self.makeTaskDescription(gid: gid, index: index, generation: generation),
+                    response: response,
+                    expectedLength: Int64(page.data.count),
+                    location: temporaryURL
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                outcomes[index] = describeDownloadError(error)
+            }
+        }
+        return outcomes
+    }
+
+    nonisolated static func testTaskDescription(gid: String, index: Int, generation: UUID) -> String {
+        makeTaskDescription(gid: gid, index: index, generation: generation)
+    }
+
+    func adoptExistingTransfersForTests(
+        _ transfers: [DownloadManagerTestSupport.TransferInventory],
+        restorationIsComplete: Bool
+    ) async {
+        adoptExistingTransfers(
+            transfers.map { $0 as any DownloadTransferControlling },
+            restorationIsComplete: restorationIsComplete
+        )
+        if restorationIsComplete {
+            pumpAll()
+        }
+    }
+
+    func reconcileForTests(gid: String, generation: UUID) async {
+        guard let item = currentItem(gid: gid, generation: generation) else { return }
+        let pending = await persistence.pendingIndices(
+            gid: gid,
+            pageCount: item.gallery.pageCount,
+            fileNames: item.fileNames
+        )
+        await reconcile(gid: gid, generation: generation, pending: pending)
+    }
+
+    func localPageURLsForTests(gid: String) -> [Int: URL] {
+        guard let download = download(gid: gid) else { return [:] }
+        return localPageURLs(for: download)
+    }
+
+    func activeTransferIndicesForTests(gid: String) -> [Int] {
+        (activeTransfers[gid] ?? []).sorted()
+    }
+
+    func installTransferSchedulerForTests(_ scheduler: ((URLRequest, String) -> Void)?) {
+        transferSchedulerForTests = scheduler
+    }
+
+    func completeScheduledTransferForTests(
+        taskDescription: String,
+        responseURL: URL,
+        data: Data,
+        statusCode: Int = 200,
+        mimeType: String = "image/png"
+    ) async -> String? {
+        let temporaryURL = DownloadPaths.root
+            .appendingPathComponent("test-\(UUID().uuidString)", isDirectory: false)
+        do {
+            try FileManager.default.createDirectory(at: DownloadPaths.root, withIntermediateDirectories: true)
+            try data.write(to: temporaryURL, options: .atomic)
+            let response = HTTPURLResponse(
+                url: responseURL,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": mimeType]
+            )
+            return await processActiveFinishedDownloadForTests(
+                taskDescription: taskDescription,
+                response: response,
+                expectedLength: Int64(data.count),
+                location: temporaryURL
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            return describeDownloadError(error)
+        }
+    }
+#endif
 
     // MARK: - Restoration
 
     // Manifest enumeration and decoding are explicit and asynchronous, so merely building the
     // downloads tab no longer scans the whole download root on the MainActor.
     func restore() async {
+#if DEBUG
+        if isResettingForTests { return }
+#endif
         if let task = restoreTask {
             await task.value
             // A restoration that could not read every gallery is never cached as final, or a
@@ -669,8 +1169,9 @@ final class DownloadManager: NSObject, ObservableObject {
             await task.value
             return
         }
-        let task = Task { [weak self] () -> Void in
-            await self?.performRestore()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performRestore()
         }
         restoreTask = task
         await task.value
@@ -705,17 +1206,28 @@ final class DownloadManager: NSObject, ObservableObject {
     // generation was replaced, or its gallery is unknown to a restoration that read
     // everything. An incomplete restoration retires nothing.
     private func adoptExistingTransfers(restorationIsComplete: Bool) async {
-        for task in await allSessionTasks() {
-            guard let identity = Self.taskIdentity(task.taskDescription) else {
-                task.cancel()
+        let tasks = await allSessionTasks()
+        adoptExistingTransfers(
+            tasks.map { URLSessionDownloadTransferController(task: $0) },
+            restorationIsComplete: restorationIsComplete
+        )
+    }
+
+    private func adoptExistingTransfers(
+        _ transfers: [any DownloadTransferControlling],
+        restorationIsComplete: Bool
+    ) {
+        for transfer in transfers {
+            guard let identity = Self.taskIdentity(transfer.taskDescription) else {
+                transfer.cancel()
                 continue
             }
             guard let item = download(gid: identity.gid) else {
-                if restorationIsComplete { task.cancel() }
+                if restorationIsComplete { transfer.cancel() }
                 continue
             }
             guard item.generation == identity.generation else {
-                task.cancel()
+                transfer.cancel()
                 continue
             }
             activeTransfers[identity.gid, default: []].insert(identity.index)
@@ -834,14 +1346,14 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func createFolder(_ name: String) {
+#if DEBUG
+        guard !isResettingForTests else { return }
+#endif
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !folders.contains(trimmed) else { return }
         folders.append(trimmed)
         folders.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        let snapshot = folders
-        Task { [persistence] in
-            await persistence.saveFolders(snapshot)
-        }
+        scheduleFolderSave()
     }
 
     func move(gid: String, to folder: String) {
@@ -892,6 +1404,9 @@ final class DownloadManager: NSObject, ObservableObject {
     // MARK: - Scheduling
 
     private func pump(gid: String) {
+#if DEBUG
+        guard !isResettingForTests else { return }
+#endif
         guard let item = download(gid: gid),
               item.status == .preparing || item.status == .downloading
         else { return }
@@ -1024,8 +1539,20 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func scheduleTransfer(gid: String, index: Int, generation: UUID, url: URL) {
+#if DEBUG
+        guard !isResettingForTests else { return }
+#endif
         var request = URLRequest(url: url)
         request.setValue("image/webp,image/png,image/gif,image/jpeg,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+#if DEBUG
+        if let transferSchedulerForTests {
+            let taskDescription = Self.makeTaskDescription(gid: gid, index: index, generation: generation)
+            activeTransfers[gid, default: []].insert(index)
+            scheduledTransferURLsForTests[taskDescription] = url
+            transferSchedulerForTests(request, taskDescription)
+            return
+        }
+#endif
         let task = session.downloadTask(with: request)
         task.taskDescription = Self.makeTaskDescription(gid: gid, index: index, generation: generation)
         activeTransfers[gid, default: []].insert(index)
@@ -1046,6 +1573,9 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func pumpAll() {
+#if DEBUG
+        guard !isResettingForTests else { return }
+#endif
         for item in downloads {
             pump(gid: item.gid)
         }
@@ -1056,6 +1586,36 @@ final class DownloadManager: NSObject, ObservableObject {
             session.getAllTasks { continuation.resume(returning: $0) }
         }
     }
+
+#if DEBUG
+    private func cancelAndDrainSessionTasksForTests() async -> Bool {
+        for _ in 0..<Self.backgroundDrainAttempts {
+            let tasks = await allSessionTasks()
+            tasks.forEach { $0.cancel() }
+            if tasks.isEmpty, await confirmSessionQuiescenceAfterDelegateBarrierForTests() { return true }
+            try? await Task.sleep(nanoseconds: Self.backgroundDrainInterval)
+        }
+        let tasks = await allSessionTasks()
+        tasks.forEach { $0.cancel() }
+        guard tasks.isEmpty else { return false }
+        return await confirmSessionQuiescenceAfterDelegateBarrierForTests()
+    }
+
+    private func confirmSessionQuiescenceAfterDelegateBarrierForTests() async -> Bool {
+        await drainDelegateQueueForTests()
+        let tasks = await allSessionTasks()
+        tasks.forEach { $0.cancel() }
+        return tasks.isEmpty && pendingDelegateWork.isEmpty && pendingBackgroundEventWork.isEmpty
+    }
+
+    private func drainDelegateQueueForTests() async {
+        await withCheckedContinuation { continuation in
+            sessionDelegateQueue.addBarrierBlock {
+                continuation.resume()
+            }
+        }
+    }
+#endif
 
     private func cancelTransfers(gid: String) async {
         pendingPumps.remove(gid)
@@ -1149,6 +1709,21 @@ final class DownloadManager: NSObject, ObservableObject {
             self.checkpointTasks[gid] = nil
             guard let item = self.download(gid: gid) else { return }
             await self.persistence.checkpoint(item)
+        }
+    }
+
+    private func scheduleFolderSave() {
+        let predecessor = folderSaveTask
+        let snapshot = folders
+        folderSaveGeneration &+= 1
+        let generation = folderSaveGeneration
+        folderSaveTask = Task { [weak self, predecessor] in
+            await predecessor?.value
+            guard let self else { return }
+            await self.persistence.saveFolders(snapshot)
+            if self.folderSaveGeneration == generation {
+                self.folderSaveTask = nil
+            }
         }
     }
 
@@ -1312,7 +1887,7 @@ final class DownloadManager: NSObject, ObservableObject {
         downloads.sort { $0.updatedAt > $1.updatedAt }
     }
 
-    private static func makeTaskDescription(gid: String, index: Int, generation: UUID) -> String {
+    private nonisolated static func makeTaskDescription(gid: String, index: Int, generation: UUID) -> String {
         "\(gid)|\(index)|\(generation.uuidString)"
     }
 
@@ -1322,6 +1897,100 @@ final class DownloadManager: NSObject, ObservableObject {
         else { return nil }
         return DownloadTaskIdentity(gid: String(parts[0]), index: index, generation: generation)
     }
+
+    private struct FinishedDownloadPreparation {
+        let identity: DownloadTaskIdentity
+        let result: Result<(staged: URL, fileExtension: String), Error>
+    }
+
+    private nonisolated static func prepareFinishedDownload(
+        taskDescription: String?,
+        response: URLResponse?,
+        expectedLength: Int64,
+        location: URL
+    ) -> FinishedDownloadPreparation? {
+        guard let identity = taskIdentity(taskDescription) else { return nil }
+        do {
+            let httpResponse = response as? HTTPURLResponse
+            let data = try Data(contentsOf: location, options: .mappedIfSafe)
+            let fileExtension = try PageValidator.validate(
+                data,
+                statusCode: httpResponse?.statusCode,
+                mimeType: httpResponse?.mimeType,
+                expectedLength: expectedLength
+            )
+            let staged = try DownloadPersistence.stage(location, fileExtension: fileExtension)
+            return FinishedDownloadPreparation(identity: identity, result: .success((staged, fileExtension)))
+        } catch {
+            return FinishedDownloadPreparation(identity: identity, result: .failure(error))
+        }
+    }
+
+    private func recordFinishedDownload(_ preparation: FinishedDownloadPreparation) async -> String? {
+#if DEBUG
+        guard !isResettingForTests else { return "The download manager is resetting." }
+#endif
+        switch preparation.result {
+        case .success(let success):
+            await recordDownloadedPage(
+                gid: preparation.identity.gid,
+                index: preparation.identity.index,
+                generation: preparation.identity.generation,
+                staged: success.staged,
+                fileExtension: success.fileExtension
+            )
+            return nil
+        case .failure(let error):
+            let message = describeDownloadError(error)
+            recordPageFailure(
+                gid: preparation.identity.gid,
+                generation: preparation.identity.generation,
+                index: preparation.identity.index,
+                message: message,
+                invalidatesRemoteURL: error is PageValidationError
+            )
+            return message
+        }
+    }
+
+    private func processFinishedDownload(
+        taskDescription: String?,
+        response: URLResponse?,
+        expectedLength: Int64,
+        location: URL
+    ) async -> String? {
+        guard let preparation = Self.prepareFinishedDownload(
+            taskDescription: taskDescription,
+            response: response,
+            expectedLength: expectedLength,
+            location: location
+        ) else { return "The download task was unrecognized." }
+        return await recordFinishedDownload(preparation)
+    }
+
+#if DEBUG
+    private func processActiveFinishedDownloadForTests(
+        taskDescription: String?,
+        response: URLResponse?,
+        expectedLength: Int64,
+        location: URL
+    ) async -> String? {
+        guard let identity = Self.taskIdentity(taskDescription),
+              activeTransfers[identity.gid]?.contains(identity.index) == true
+        else { return "The download task was not active." }
+        if let taskDescription,
+           let scheduledURL = scheduledTransferURLsForTests[taskDescription],
+           response?.url != scheduledURL {
+            return "The download response URL was not scheduled."
+        }
+        return await processFinishedDownload(
+            taskDescription: taskDescription,
+            response: response,
+            expectedLength: expectedLength,
+            location: location
+        )
+    }
+#endif
 }
 
 extension DownloadManager: URLSessionDownloadDelegate {
@@ -1330,42 +1999,20 @@ extension DownloadManager: URLSessionDownloadDelegate {
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        guard let identity = Self.taskIdentity(downloadTask.taskDescription) else { return }
-        let response = downloadTask.response as? HTTPURLResponse
-        let statusCode = response?.statusCode
-        let mimeType = response?.mimeType
-        let expectedLength = downloadTask.countOfBytesExpectedToReceive
         pendingDelegateWork.enter()
-
-        // Validation and staging are synchronous because the system temporary file is removed
-        // as soon as this method returns; only the manifest update hops to the MainActor. The
-        // transfer keeps its window slot until that update completes, so the page cannot be
-        // scheduled a second time while it is being recorded.
-        do {
-            let data = try Data(contentsOf: location, options: .mappedIfSafe)
-            let fileExtension = try PageValidator.validate(
-                data, statusCode: statusCode, mimeType: mimeType, expectedLength: expectedLength
-            )
-            let staged = try DownloadPersistence.stage(location, fileExtension: fileExtension)
-            Task { @MainActor [weak self] in
-                defer { pendingDelegateWork.leave() }
-                await self?.recordDownloadedPage(
-                    gid: identity.gid, index: identity.index, generation: identity.generation,
-                    staged: staged, fileExtension: fileExtension
-                )
-            }
-        } catch {
-            let message = describeDownloadError(error)
-            // Rejected bytes always mean the resolved URL is spent (expired signature, quota
-            // placeholder, error page), so it is invalidated and resolved again.
-            let invalidates = error is PageValidationError
-            Task { @MainActor [weak self] in
-                defer { pendingDelegateWork.leave() }
-                self?.recordPageFailure(
-                    gid: identity.gid, generation: identity.generation, index: identity.index,
-                    message: message, invalidatesRemoteURL: invalidates
-                )
-            }
+        let expectedLength = downloadTask.countOfBytesExpectedToReceive
+        guard let preparation = Self.prepareFinishedDownload(
+            taskDescription: downloadTask.taskDescription,
+            response: downloadTask.response,
+            expectedLength: expectedLength,
+            location: location
+        ) else {
+            pendingDelegateWork.leave()
+            return
+        }
+        Task { @MainActor [weak self] in
+            defer { pendingDelegateWork.leave() }
+            _ = await self?.recordFinishedDownload(preparation)
         }
     }
 
@@ -1374,11 +2021,17 @@ extension DownloadManager: URLSessionDownloadDelegate {
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
-        guard let error, let identity = Self.taskIdentity(task.taskDescription) else { return }
-        let nsError = error as NSError
-        guard !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) else { return }
-        let invalidates = invalidatesRemoteURL(nsError)
         pendingDelegateWork.enter()
+        guard let error, let identity = Self.taskIdentity(task.taskDescription) else {
+            pendingDelegateWork.leave()
+            return
+        }
+        let nsError = error as NSError
+        guard !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) else {
+            pendingDelegateWork.leave()
+            return
+        }
+        let invalidates = invalidatesRemoteURL(nsError)
         Task { @MainActor [weak self] in
             defer { pendingDelegateWork.leave() }
             self?.recordPageFailure(
@@ -1389,7 +2042,9 @@ extension DownloadManager: URLSessionDownloadDelegate {
     }
 
     nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        pendingBackgroundEventWork.enter()
         Task { @MainActor [weak self] in
+            defer { pendingBackgroundEventWork.leave() }
             await self?.finishBackgroundEvents()
         }
     }
