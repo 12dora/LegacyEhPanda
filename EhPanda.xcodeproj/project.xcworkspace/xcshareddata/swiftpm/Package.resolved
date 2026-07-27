@@ -29,15 +29,6 @@
       }
     },
     {
-      "identity" : "deprecatedapi",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/EhPanda-Team/DeprecatedAPI.git",
-      "state" : {
-        "branch" : "main",
-        "revision" : "021e29675457a9b4b7859a46afbb5d0e37574e84"
-      }
-    },
-    {
       "identity" : "filepicker",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/markrenaud/FilePicker.git",
@@ -224,15 +215,6 @@
       "state" : {
         "revision" : "e49e6c32ea556e9fa0109dc79686bea4a10d41a2",
         "version" : "2.2.0"
-      }
-    },
-    {
-      "identity" : "waterfallgrid",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/paololeonardi/WaterfallGrid.git",
-      "state" : {
-        "revision" : "944aa82832ed5a9eaaf50862cdd53e3c10ab55eb",
-        "version" : "1.0.1"
       }
     },
     {

@@ -7,7 +7,6 @@
 
 enum TestError: Error {
     case htmlDocumentNotFound(HTMLFilename)
-    case parsingFailed(String)
 }
 
 extension TestError {
@@ -15,8 +14,6 @@ extension TestError {
         switch self {
         case .htmlDocumentNotFound(let filename):
             return "HTML document \(filename.rawValue) not found."
-        case .parsingFailed(let type):
-            return "Failed in parsing \(type)."
         }
     }
 }

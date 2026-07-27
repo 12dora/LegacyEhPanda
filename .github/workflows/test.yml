@@ -1,20 +1,240 @@
 name: Test
-on: [push, workflow_dispatch]
+
+# Runs on every push to a maintained branch, on every pull request targeting
+# one, and as a reusable workflow so that Release IPA can gate on it.
+#
+# There is deliberately no "[skip test]" escape hatch: this workflow is meant to
+# be configured as a required status check (see README.md → Continuous
+# integration), and a skippable required check is not a gate.
+on:
+  push:
+    branches:
+      - main
+      - 'backport/**'
+  pull_request:
+    branches:
+      - main
+      - 'backport/**'
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 env:
-   SCHEME_NAME: 'EhPanda'
-   DEVELOPER_DIR: /Applications/Xcode_15.4.app
+  SCHEME_NAME: EhPanda
+  PROJECT_NAME: EhPanda.xcodeproj
+
 jobs:
-  Test:
-    runs-on: macos-14
-    if: ${{ !contains(github.event.head_commit.message, '[skip test]') }}
+  test-current:
+    # Required status check. Keep this name stable.
+    name: Tests (current iOS)
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Show Xcode version
-        run: xcodebuild -version
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Select simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/select-simulator.sh
+          SELECTED="$(.github/scripts/select-simulator.sh)"
+          IFS='|' read -r UDID NAME VERSION <<< "${SELECTED}"
+          echo "Using ${NAME} (iOS ${VERSION}) ${UDID}"
+          echo "udid=${UDID}" >> "$GITHUB_OUTPUT"
+          echo "label=${NAME} / iOS ${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Run tests
-        run: xcodebuild clean test
-          -skipMacroValidation
-          -sdk iphonesimulator
-          -scheme ${{ env.SCHEME_NAME }}
-          -destination 'platform=iOS Simulator,name=iPhone 15 Pro'
+        run: |
+          set -euo pipefail
+          rm -rf "${{ github.workspace }}/TestResults.xcresult"
+          xcodebuild clean test \
+            -project "${PROJECT_NAME}" \
+            -scheme "${SCHEME_NAME}" \
+            -skipMacroValidation \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -enableCodeCoverage YES \
+            -resultBundlePath "${{ github.workspace }}/TestResults.xcresult"
+
+      - name: Publish coverage
+        if: always()
+        run: |
+          set -uo pipefail
+          RESULT="${{ github.workspace }}/TestResults.xcresult"
+          if [ ! -d "${RESULT}" ]; then
+            echo "::warning::No result bundle at ${RESULT}; coverage not collected."
+            exit 0
+          fi
+          if xcrun xccov view --report --only-targets "${RESULT}" > /tmp/coverage.txt 2>/tmp/coverage.err; then
+            {
+              echo "### Code coverage — ${{ steps.sim.outputs.label }}"
+              echo ''
+              echo '```'
+              cat /tmp/coverage.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/coverage.txt
+          else
+            echo "::warning::xccov could not read the result bundle: $(cat /tmp/coverage.err)"
+          fi
+
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults-current-iOS
+          path: ${{ github.workspace }}/TestResults.xcresult
+          if-no-files-found: warn
+          retention-days: 7
+
+  test-ios16:
+    # iOS 16 is the minimum deployment target, so a runtime lane is required to
+    # catch runtime-only regressions that a current-OS lane cannot see.
+    #
+    # The job splits "can we get an iOS 16 runtime?" from "does the suite pass
+    # on it?", because only the first of those is outside our control:
+    #
+    #   * Runtime acquisition is BEST EFFORT (the prepare step is
+    #     continue-on-error). No GitHub-hosted image ships an iOS 16 runtime any
+    #     more - macos-13 with Xcode 14.3.1 + iOS 16.4 was retired and macos-14
+    #     retirement is scheduled - so the runtime is downloaded on demand, and
+    #     Apple can withdraw that download at any time. When it cannot be
+    #     installed the lane emits a loud warning and does not pretend to have
+    #     tested anything.
+    #
+    #   * The test result is a HARD FAILURE. The job itself is not
+    #     continue-on-error, so once the runtime is installed a genuine iOS 16
+    #     regression fails this job, fails the Test workflow, and blocks the
+    #     release workflow that gates on it. An iOS 16 failure is never
+    #     swallowed.
+    #
+    # To remove the best-effort part entirely, register a self-hosted runner
+    # labelled `ios16-runtime` with Xcode 14.3.1/15.x and the iOS 16.4 simulator
+    # runtime preinstalled, and point `runs-on` at it.
+    name: Tests (iOS 16 runtime)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      # Best effort: only the availability of the runtime download is tolerated.
+      - name: Prepare iOS 16 simulator
+        id: sim16
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/prepare-ios16-simulator.sh
+          UDID="$(.github/scripts/prepare-ios16-simulator.sh)"
+          echo "Created ${UDID}"
+          echo "udid=${UDID}" >> "$GITHUB_OUTPUT"
+
+      - name: Report unavailable iOS 16 runtime
+        if: steps.sim16.outcome != 'success' || steps.sim16.outputs.udid == ''
+        run: |
+          echo "::warning title=iOS 16 lane did not run::No iOS 16 simulator runtime could be installed on this runner, so the iOS 16 suite was NOT executed. This run makes no claim about iOS 16. See .github/scripts/prepare-ios16-simulator.sh."
+          {
+            echo '### iOS 16 lane: NOT EXECUTED'
+            echo ''
+            echo 'The iOS 16.4 simulator runtime could not be installed on this runner,'
+            echo 'so no iOS 16 result exists for this revision.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Hard gate: if the runtime exists, the suite must pass on it.
+      - name: Run tests on iOS 16
+        if: steps.sim16.outcome == 'success' && steps.sim16.outputs.udid != ''
+        run: |
+          set -euo pipefail
+          xcodebuild clean test \
+            -project "${PROJECT_NAME}" \
+            -scheme "${SCHEME_NAME}" \
+            -skipMacroValidation \
+            -destination "platform=iOS Simulator,id=${{ steps.sim16.outputs.udid }}" \
+            -resultBundlePath "${{ github.workspace }}/TestResults-iOS16.xcresult"
+
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults-iOS16
+          path: ${{ github.workspace }}/TestResults-iOS16.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+
+  lint:
+    # SwiftLint no longer runs as an Xcode build phase: it used to warn-and-
+    # succeed whenever the tool was missing, so a developer without it installed
+    # got a silently different validation result. Both tools are enforced here,
+    # where they are always installed, and both steps are hard gates.
+    name: Lint & generated sources
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install swiftlint swiftgen
+
+      # Hard gate. `swiftlint lint` exits non-zero only on error-severity
+      # violations; warnings are surfaced as annotations without blocking.
+      # The repository is currently clean at error severity - the one
+      # pre-existing violation is listed for paydown in `.swiftlint.yml`.
+      - name: SwiftLint
+        run: |
+          set -uo pipefail
+          set +e
+          swiftlint version
+          swiftlint lint --reporter github-actions-logging | tee /tmp/swiftlint.txt
+          STATUS=${PIPESTATUS[0]}
+          {
+            echo '### SwiftLint'
+            echo ''
+            echo '```'
+            tail -60 /tmp/swiftlint.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${STATUS}" -ne 0 ]; then
+            echo "::error title=SwiftLint::Error-severity violations were introduced (see annotations). Fix them, or add a narrowly scoped, commented exception to .swiftlint.yml."
+          fi
+          exit "${STATUS}"
+
+      # Hard gate. The tracked generated sources are authoritative, so they must
+      # be byte-identical to what `swiftgen` produces from swiftgen.yml. Without
+      # this, an Xcode build that happens to run the SwiftGen phase silently
+      # rewrites tracked source and validation differs per machine.
+      - name: SwiftGen drift
+        run: |
+          set -euo pipefail
+          swiftgen --version
+          swiftgen
+          if git diff --quiet -- EhPanda/App/Generated; then
+            echo "Generated sources are up to date."
+          else
+            git --no-pager diff -- EhPanda/App/Generated
+            {
+              echo '### SwiftGen drift'
+              echo ''
+              echo 'EhPanda/App/Generated is not what swiftgen.yml produces.'
+              echo 'Run `swiftgen` locally and commit the result.'
+              echo ''
+              echo '```'
+              git --no-pager diff --stat -- EhPanda/App/Generated
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=SwiftGen drift::EhPanda/App/Generated does not match the output of 'swiftgen'. Run 'swiftgen' at the repository root and commit EhPanda/App/Generated/Strings.swift."
+            exit 1
+          fi

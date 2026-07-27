@@ -85,6 +85,32 @@ xcodebuild build \
 
 Signing: this fork is typically distributed **unsigned**, like many AltStore community builds. You must resign / sideload according to your tool of choice.
 
+GitHub Releases is the **only** distribution source for this fork. The upstream AltStore source (`AltStore.json`) and the maintainer-gated `deploy.yml` publishing path were removed because they pointed at upstream EhPanda releases and could never publish anything for this repository.
+
+---
+
+## Continuous integration
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| [`test.yml`](.github/workflows/test.yml) | push + pull request on `main` / `backport/**`, manual, reusable | `Tests (current iOS)`, `Tests (iOS 16 runtime)`, `Lint & generated sources` |
+| [`release-ipa.yml`](.github/workflows/release-ipa.yml) | `v*` tag or manual | Runs `test.yml` first, then archives, validates app/appex versions, packages and publishes the IPA |
+| [`dependencies.yml`](.github/workflows/dependencies.yml) | weekly + manual | Tests the resolved graph, then opens Swift Package update PRs against every maintained branch |
+
+Every job in `test.yml` is a blocking gate, and `release-ipa.yml` cannot publish unless all of them pass. There is no `[skip test]` escape hatch.
+
+Recommended branch protection for `main` and `backport/**`: require **`Tests (current iOS)`**, **`Tests (iOS 16 runtime)`** and **`Lint & generated sources`** before merging.
+
+Notes on the individual gates:
+
+- **`Tests (iOS 16 runtime)`** downloads the iOS 16.4 simulator runtime on a `macos-15` runner, because no GitHub-hosted image ships one preinstalled. Only the *runtime download* is best effort: if it is unavailable the lane warns loudly and makes no iOS 16 claim. If the runtime installs, a test failure fails the job. Register a self-hosted runner labelled `ios16-runtime` with Xcode 14.3.1/15.x and the iOS 16.4 runtime preinstalled to remove the best-effort part.
+- **SwiftLint** blocks on error-severity violations. Warnings appear as annotations. Pre-existing debt is recorded as commented exclusions in [`.swiftlint.yml`](.swiftlint.yml) so it can be paid down without weakening the gate.
+- **SwiftGen** blocks when `EhPanda/App/Generated` differs from what `swiftgen` produces. The tracked generated sources are authoritative — run `swiftgen` at the repository root and commit the result.
+
+SwiftLint no longer runs as an Xcode build phase; it is enforced in CI so that a developer without the tool installed no longer gets a silently different validation result. SwiftGen still runs as a build phase, but with declared input/output files so it does not run on every build.
+
+`dependencies.yml` runs `xcodebuild test` on the resolved graph **before** opening a pull request, and refuses to run at all unless a `DEPENDENCY_UPDATE_TOKEN` secret is configured — pull requests opened with the default `GITHUB_TOKEN` do not trigger workflows, so they could otherwise merge untested.
+
 ---
 
 ## What was backported (high level)

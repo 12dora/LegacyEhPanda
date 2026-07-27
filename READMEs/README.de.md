@@ -25,7 +25,7 @@ GitHub Readme: [README.{lang}.md](/READMEs)
 https://ehpanda.app: [main.js](https://github.com/EhPanda-Team/ehpanda-website/blob/main/src/main.js)
 
 ## Installation
-1. Lade die IPA-Datei hier herunter: [Releases](https://github.com/EhPanda-Team/EhPanda/releases).
+1. Lade die IPA-Datei hier herunter: [Releases](https://github.com/12dora/LegacyEhPanda/releases).
 2. Nutze eine Programm zur Installation von nicht im Appstore gelisteten Dateien wie z.B. [AltStore](https://altstore.io) um die IPA-Datei zu installieren.
 
 ## Systemanforderungen

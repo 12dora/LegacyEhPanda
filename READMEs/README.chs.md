@@ -25,7 +25,7 @@ GitHub Readme: [README.{lang}.md](/READMEs)
 https://ehpanda.app: [main.js](https://github.com/EhPanda-Team/ehpanda-website/blob/main/src/main.js)
 
 ## 安装步骤
-1. 在 [Releases](https://github.com/EhPanda-Team/EhPanda/releases) 取得 ipa 文件。
+1. 在 [Releases](https://github.com/12dora/LegacyEhPanda/releases) 取得 ipa 文件。
 2. 使用 [AltStore](https://altstore.io) 这类软件将 ipa 文件安装到你的设备。
 
 ## 系统要求

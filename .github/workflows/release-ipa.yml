@@ -22,7 +22,6 @@ permissions:
 
 env:
   SCHEME_NAME: EhPanda
-  DEVELOPER_DIR: /Applications/Xcode_15.4.app
   BUILDS_PATH: ${{ github.workspace }}/.ci-build
   PAYLOAD_PATH: ${{ github.workspace }}/.ci-build/Payload
   ARCHIVE_PATH: ${{ github.workspace }}/.ci-build/EhPanda.xcarchive
@@ -30,9 +29,15 @@ env:
   THIN_PAYLOAD_SCRIPT_PATH: ./actions-tool/thin-payload.sh
 
 jobs:
+  # An IPA must never ship without the test suite having run on this revision.
+  test:
+    name: Tests
+    uses: ./.github/workflows/test.yml
+
   build-and-release:
     name: Build IPA & publish Release
-    runs-on: macos-14
+    needs: test
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -145,17 +150,47 @@ jobs:
           cp -R "${BUILDS_PATH}/Build/Release-iphoneos/${SCHEME_NAME}.app" \
             "${ARCHIVE_PATH}/Products/Applications/${SCHEME_NAME}.app"
 
-      - name: Package IPA
+      - name: Validate bundle metadata
         run: |
           set -euo pipefail
           APP_SRC="${ARCHIVE_PATH}/Products/Applications/${SCHEME_NAME}.app"
           test -d "${APP_SRC}"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP_SRC}/Info.plist")" \
-            = "${{ steps.ver.outputs.binary_version }}"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP_SRC}/Info.plist")" \
-            = "${{ steps.ver.outputs.build }}"
+
+          APP_SHORT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP_SRC}/Info.plist")"
+          APP_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP_SRC}/Info.plist")"
+          echo "App  CFBundleShortVersionString=${APP_SHORT} CFBundleVersion=${APP_BUILD}"
+          test "${APP_SHORT}" = "${{ steps.ver.outputs.binary_version }}"
+          test "${APP_BUILD}" = "${{ steps.ver.outputs.build }}"
+
+          # The embedded Share Extension used to inherit no MARKETING_VERSION,
+          # so the built .appex shipped without CFBundleShortVersionString and
+          # ordinary distribution validation could reject the package.
+          APPEX="${APP_SRC}/PlugIns/ShareExtension.appex"
+          if [ ! -d "${APPEX}" ]; then
+            echo "::error::ShareExtension.appex is missing from ${APP_SRC}; the app extension was not embedded."
+            exit 1
+          fi
+          # `|| true`: a missing key makes PlistBuddy exit non-zero, and the
+          # explicit comparisons below produce a far better diagnostic.
+          APPEX_SHORT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APPEX}/Info.plist" 2>/dev/null || true)"
+          APPEX_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APPEX}/Info.plist" 2>/dev/null || true)"
+          echo "Appex CFBundleShortVersionString=${APPEX_SHORT} CFBundleVersion=${APPEX_BUILD}"
+          if [ -z "${APPEX_SHORT}" ] || [ "${APPEX_SHORT}" != "${APP_SHORT}" ]; then
+            echo "::error::app/appex CFBundleShortVersionString mismatch: '${APP_SHORT}' vs '${APPEX_SHORT}'."
+            exit 1
+          fi
+          if [ -z "${APPEX_BUILD}" ] || [ "${APPEX_BUILD}" != "${APP_BUILD}" ]; then
+            echo "::error::app/appex CFBundleVersion mismatch: '${APP_BUILD}' vs '${APPEX_BUILD}'."
+            exit 1
+          fi
+
           file "${APP_SRC}/${SCHEME_NAME}"
           lipo -info "${APP_SRC}/${SCHEME_NAME}" || true
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP_SRC="${ARCHIVE_PATH}/Products/Applications/${SCHEME_NAME}.app"
 
           rm -rf "${PAYLOAD_PATH}"
           mkdir -p "${PAYLOAD_PATH}"

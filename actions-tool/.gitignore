@@ -1,0 +1,5 @@
+# Never track compiled helpers: CI builds them into the runner temp directory.
+# (A tracked x86_64 Mach-O `ReleaseNotesFilter` used to live here.)
+*.o
+*.dSYM/
+ReleaseNotesFilter

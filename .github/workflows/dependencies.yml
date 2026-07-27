@@ -1,30 +1,89 @@
 name: Xcode Dependencies
+
 on:
   schedule:
     - cron: '0 0 * * 1'
   workflow_dispatch:
+
 permissions:
   contents: write
   pull-requests: write
+
+env:
+  SCHEME_NAME: EhPanda
+  PROJECT_NAME: EhPanda.xcodeproj
+
 jobs:
   dependencies:
-    runs-on: macos-14
+    name: Update dependencies (${{ matrix.branch }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Maintained branches only. The old workflow checked out `develop`,
+        # which is an upstream history this fork does not ship from, so the
+        # shipping line never received dependency updates.
+        branch:
+          - main
+          - backport/ios16-with-latest-fixes
     steps:
+      # Pull requests opened with the default GITHUB_TOKEN do not trigger other
+      # workflows, so a dependency bump could merge without the Test workflow
+      # ever running. Refuse to open such a pull request rather than opening an
+      # unverifiable one.
+      - name: Require a pull-request token that triggers checks
+        env:
+          DEPENDENCY_UPDATE_TOKEN: ${{ secrets.DEPENDENCY_UPDATE_TOKEN }}
+        run: |
+          if [ -z "${DEPENDENCY_UPDATE_TOKEN}" ]; then
+            echo "::error::DEPENDENCY_UPDATE_TOKEN is not configured. Pull requests opened with the default GITHUB_TOKEN do not trigger the Test workflow, so a dependency bump could land untested. Create a personal access token with 'repo' and 'workflow' scope and store it as the DEPENDENCY_UPDATE_TOKEN repository secret."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ matrix.branch }}
+
       - name: Resolve Dependencies
         id: resolution
         uses: GetSidetrack/action-xcodeproj-spm-update@0.3.0
         with:
           forceResolution: true
           failWhenOutdated: false
-          xcodePath: '/Applications/Xcode_15.4.app'
+
+      # Belt and braces: validate the resolved tree here, before the pull
+      # request exists. This does not depend on PR events firing at all, so a
+      # dependency bump can never reach a branch without having been tested.
+      - name: Test the updated dependency graph
+        if: steps.resolution.outputs.dependenciesChanged == 'true'
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/select-simulator.sh
+          SELECTED="$(.github/scripts/select-simulator.sh)"
+          IFS='|' read -r UDID NAME VERSION <<< "${SELECTED}"
+          echo "Validating the dependency update on ${NAME} (iOS ${VERSION})"
+          xcodebuild clean test \
+            -project "${PROJECT_NAME}" \
+            -scheme "${SCHEME_NAME}" \
+            -skipMacroValidation \
+            -destination "platform=iOS Simulator,id=${UDID}"
+
       - name: Create Pull Request
         if: steps.resolution.outputs.dependenciesChanged == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          branch: 'update-dependencies'
+          token: ${{ secrets.DEPENDENCY_UPDATE_TOKEN }}
+          base: ${{ matrix.branch }}
+          branch: update-dependencies/${{ matrix.branch }}
           delete-branch: true
-          commit-message: 'Update dependencies [skip test]'
-          title: 'Updated Dependencies'
+          # No "[skip test]" marker: dependency bumps are exactly the changes
+          # that must be tested.
+          commit-message: 'Update dependencies'
+          title: 'Updated Dependencies (${{ matrix.branch }})'
+          body: |
+            Automated Swift Package dependency refresh for `${{ matrix.branch }}`.
+
+            The resolved graph already passed `xcodebuild test` in the
+            `Xcode Dependencies` run that produced this branch, and the `Test`
+            workflow runs again on this pull request because it was opened with
+            `DEPENDENCY_UPDATE_TOKEN`.
