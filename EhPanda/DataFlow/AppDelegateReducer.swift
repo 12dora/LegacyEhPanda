@@ -40,7 +40,12 @@ struct AppDelegateReducer: Reducer {
                 )
 
             case .removeExpiredImageURLs:
-                return .run(operation: { _ in await databaseClient.removeExpiredImageURLs() })
+                return .run { _ in
+                    let result = await databaseClient.removeExpiredImageURLs()
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to remove expired image URLs.", context: ["error": "\(error)"])
+                    }
+                }
 
             case .migration:
                 return .none
@@ -56,7 +61,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     let store = Store(initialState: .init()) {
         AppReducer()
     }
-    lazy var viewStore = ViewStore(store, observe: { $0 })
 
     static var orientationMask: UIInterfaceOrientationMask = DeviceUtil.isPad ? .all : [.portrait, .portraitUpsideDown]
 
@@ -69,7 +73,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         if !AppUtil.isTesting {
-            viewStore.send(.appDelegate(.onLaunchFinish))
+            // Sending straight to the store avoids keeping a whole app state observer alive
+            // for the lifetime of the process.
+            store.send(.appDelegate(.onLaunchFinish))
         }
         return true
     }

@@ -10,13 +10,23 @@ import SFSafeSymbols
 import ComposableArchitecture
 
 struct TabBarView: View {
-    @Environment(\.scenePhase) private var scenePhase
     private let store: StoreOf<AppReducer>
     @ObservedObject private var viewStore: ViewStoreOf<AppReducer>
 
     init(store: StoreOf<AppReducer>) {
         self.store = store
-        viewStore = ViewStore(store, observe: { $0 })
+        // The tab bar itself only renders navigation, lock and setting state, while every child
+        // feature observes its own scoped store. Ignoring the states it does not read keeps their
+        // (frequent) updates from invalidating the whole root.
+        viewStore = ViewStore(
+            store, observe: { $0 },
+            removeDuplicates: {
+                $0.tabBarState == $1.tabBarState
+                && $0.appLockState == $1.appLockState
+                && $0.appRouteState == $1.appRouteState
+                && $0.settingState == $1.settingState
+            }
+        )
     }
 
     var body: some View {
@@ -25,8 +35,8 @@ struct TabBarView: View {
                 selection: .init(
                     get: { viewStore.tabBarState.tabBarItemType },
                     set: { tab in
-                        if tab == .setting, DeviceUtil.isPad {
-                            viewStore.send(.appRoute(.setNavigation(.setting)))
+                        if tab == .setting {
+                            viewStore.send(.openSettings)
                         } else {
                             viewStore.send(.tabBar(.setTabBarItemType(tab)))
                         }
@@ -119,8 +129,6 @@ struct TabBarView: View {
             unwrapping: viewStore.$appRouteState.route,
             case: /AppRouteReducer.Route.hud
         )
-        .onChange(of: scenePhase) { viewStore.send(.onScenePhaseChange($0)) }
-        .onOpenURL { viewStore.send(.appRoute(.handleDeepLink($0))) }
     }
 }
 

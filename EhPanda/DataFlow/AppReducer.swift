@@ -18,11 +18,36 @@ struct AppReducer: Reducer {
         var favoritesState = FavoritesReducer.State()
         var searchRootState = SearchRootReducer.State()
         @BindingState var settingState = SettingReducer.State()
+
+        /// The phase of every connected scene, keyed by its identity. The app lock reacts to the
+        /// aggregate only, so one iPad window going inactive cannot blur or lock the others.
+        var scenePhases = [UUID: ScenePhase]()
+        /// A custom scheme URL that arrived before the app was able to act on it.
+        var pendingDeepLinkURL: URL?
+
+        var aggregateScenePhase: ScenePhase {
+            if scenePhases.values.contains(.active) {
+                return .active
+            } else if scenePhases.values.contains(.inactive) {
+                return .inactive
+            } else {
+                return .background
+            }
+        }
+        /// Deep links may only be consumed once the database and the user settings are available.
+        var isReadyForDeepLink: Bool {
+            appDelegateState.migrationState.databaseState == .idle && settingState.hasLoadedInitialSetting
+        }
     }
 
     enum Action: BindableAction {
         case binding(BindingAction<State>)
+        /// The phase of a single scene. Only the aggregate reaches `onScenePhaseChange`.
+        case onSceneChange(UUID, ScenePhase)
+        case onSceneDisappear(UUID)
         case onScenePhaseChange(ScenePhase)
+        case onOpenURL(URL)
+        case openSettings
 
         case appDelegate(AppDelegateReducer.Action)
         case appRoute(AppRouteReducer.Action)
@@ -39,6 +64,7 @@ struct AppReducer: Reducer {
     @Dependency(\.hapticsClient) private var hapticsClient
     @Dependency(\.cookieClient) private var cookieClient
     @Dependency(\.deviceClient) private var deviceClient
+    @Dependency(\.databaseClient) private var databaseClient
 
     var body: some Reducer<State, Action> {
         LoggingReducer {
@@ -59,6 +85,22 @@ struct AppReducer: Reducer {
                 case .binding:
                     return .none
 
+                case .onSceneChange(let sceneID, let scenePhase):
+                    // Several windows share this store, so the app only reacts once all of them
+                    // agree: a single iPad window going inactive must not blur or lock the others.
+                    let previousPhase = state.aggregateScenePhase
+                    state.scenePhases[sceneID] = scenePhase
+                    let currentPhase = state.aggregateScenePhase
+                    guard currentPhase != previousPhase else { return .none }
+                    return .send(.onScenePhaseChange(currentPhase))
+
+                case .onSceneDisappear(let sceneID):
+                    let previousPhase = state.aggregateScenePhase
+                    state.scenePhases.removeValue(forKey: sceneID)
+                    let currentPhase = state.aggregateScenePhase
+                    guard currentPhase != previousPhase else { return .none }
+                    return .send(.onScenePhaseChange(currentPhase))
+
                 case .onScenePhaseChange(let scenePhase):
                     guard state.settingState.hasLoadedInitialSetting else { return .none }
 
@@ -70,10 +112,41 @@ struct AppReducer: Reducer {
 
                     case .inactive:
                         let blurRadius = state.settingState.setting.backgroundBlurRadius
-                        return .send(.appLock(.onBecomeInactive(blurRadius)))
+                        return .merge(
+                            .send(.appLock(.onBecomeInactive(blurRadius))),
+                            // The debounced settings write is not crash proof. This only runs when
+                            // the app as a whole stops being frontmost, so several windows cannot
+                            // fight over it.
+                            .run { [setting = state.settingState.setting] _ in
+                                let result = await databaseClient.updateSetting(setting)
+                                if case .failure(let error) = result {
+                                    Logger.error("Failed to persist setting on inactive.", context: [
+                                        "error": "\(error)"
+                                    ])
+                                }
+                            }
+                        )
 
                     default:
                         return .none
+                    }
+
+                case .onOpenURL(let url):
+                    // A cold launch reaches this before the tab bar (and the route it needs)
+                    // exists, so the intent is queued instead of being dropped.
+                    guard state.isReadyForDeepLink else {
+                        state.pendingDeepLinkURL = url
+                        return .none
+                    }
+                    return .send(.appRoute(.handleDeepLink(url)))
+
+                case .openSettings:
+                    // The Settings tab cannot be selected on iPad, where it is presented as a
+                    // sheet instead. Sending the tab action there did nothing at all.
+                    if deviceClient.isPad() {
+                        return .send(.appRoute(.setNavigation(.setting)))
+                    } else {
+                        return .send(.tabBar(.setTabBarItemType(.setting)))
                     }
 
                 case .appDelegate(.migration(.onDatabasePreparationSuccess)):
@@ -153,7 +226,7 @@ struct AppReducer: Reducer {
                 case .home(.watched(.onNotLoginViewButtonTapped)), .favorites(.onNotLoginViewButtonTapped):
                     var effects: [Effect<Action>] = [
                         .run(operation: { _ in hapticsClient.generateFeedback(.soft) }),
-                        .send(.tabBar(.setTabBarItemType(.setting)))
+                        .send(.openSettings)
                     ]
                     effects.append(.send(.setting(.setNavigation(.account))))
                     if !cookieClient.didLogin {
@@ -186,6 +259,12 @@ struct AppReducer: Reducer {
                     }
                     if state.settingState.setting.detectsLinksFromClipboard {
                         effects.append(.send(.appRoute(.detectClipboardURL)))
+                    }
+                    // The app is ready now, so a URL that launched it can finally be handled. It
+                    // goes last, so that it wins over a clipboard link detected at the same time.
+                    if let url = state.pendingDeepLinkURL {
+                        state.pendingDeepLinkURL = nil
+                        effects.append(.send(.appRoute(.handleDeepLink(url))))
                     }
                     return effects.isEmpty ? .none : .merge(effects)
 
