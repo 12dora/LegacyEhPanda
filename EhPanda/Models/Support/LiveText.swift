@@ -119,16 +119,6 @@ struct LiveTextGroup: Equatable, Identifiable {
         width = maxX - minX
         height = maxY - minY
     }
-
-    // Returns the rect of a rectangle area which contains all live text blocks
-    func getRect(width: Double, height: Double, extendSize: Double) -> CGRect {
-        .init(
-            x: minX * width - extendSize,
-            y: minY * height - extendSize,
-            width: (maxX - minX) * width + extendSize * 2,
-            height: (maxY - minY) * height + extendSize * 2
-        )
-    }
 }
 
 // MARK: LiveTextBlock

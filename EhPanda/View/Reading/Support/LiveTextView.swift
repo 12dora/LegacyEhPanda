@@ -88,6 +88,10 @@ struct LiveTextView: View {
                         }
                     }
                 }
+                // Only the recognized rectangles may take touches. The canvas covers the
+                // whole page, and letting it hit-test would put a transparent wall
+                // between the reader's tap/zoom gestures and the image below it.
+                .allowsHitTesting(false)
 
                 ForEach(liveTextGroups) { textGroup in
                     HighlightView(text: textGroup.text) {
@@ -106,27 +110,32 @@ struct LiveTextView: View {
 
 // MARK: HighlightView
 private struct HighlightView: UIViewRepresentable {
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIEditMenuInteractionDelegate {
         var textView: UITextView?
+        var editMenuInteraction: UIEditMenuInteraction?
         var highLightView: HighlightView
 
         init(_ highLightView: HighlightView) {
             self.highLightView = highLightView
         }
 
-        @objc func onTap(sender: UIView) {
+        @objc func onTap(sender: UITapGestureRecognizer) {
             Logger.info("onTap", context: ["tappedText": textView?.text])
             guard let textView = textView else { return }
 
-            let height = textView.contentSize.height
-            textView.contentInset = .init(
-                top: textView.frame.height / 2 - height / 2,
-                left: textView.frame.width / 2,
-                bottom: 0, right: 0
-            )
             highLightView.tapAction()
+            // Select the recognized text and hand it to the public edit menu, which
+            // gathers Copy / Look Up / Translate from the responder chain and simply
+            // omits whatever the device cannot offer. The previous implementation
+            // performed the private `_translate:` selector unguarded, which is both an
+            // App Store risk and an Objective-C exception wherever it does not exist.
+            textView.becomeFirstResponder()
             textView.selectAll(nil)
-            textView.perform(NSSelectorFromString("_translate:"), with: nil)
+            guard let editMenuInteraction = editMenuInteraction else { return }
+            let configuration = UIEditMenuConfiguration(
+                identifier: nil, sourcePoint: sender.location(in: textView)
+            )
+            editMenuInteraction.presentEditMenu(with: configuration)
         }
     }
 
@@ -138,6 +147,14 @@ private struct HighlightView: UIViewRepresentable {
         self.tapAction = tapAction
     }
 
+    // Emoji presentation scalars are dropped: they carry no translatable content and
+    // break up the selection the edit menu operates on.
+    private var sanitizedText: String {
+        text.unicodeScalars
+            .filter { !$0.properties.isEmojiPresentation }
+            .reduce("") { $0 + String($1) }
+    }
+
     func makeCoordinator() -> Coordinator {
         .init(self)
     }
@@ -145,30 +162,43 @@ private struct HighlightView: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
         context.coordinator.textView = textView
-        let text = text.unicodeScalars
-            .filter { !$0.properties.isEmojiPresentation }
-            .reduce("") { $0 + String($1)}
-        textView.text = text
+        textView.text = sanitizedText
         textView.isEditable = false
         textView.tintColor = .clear
         textView.textColor = .clear
         textView.backgroundColor = .clear
         textView.font = .systemFont(ofSize: 0)
-        textView.isSelectable = false
         textView.autocapitalizationType = .sentences
         textView.isSelectable = true
         textView.isUserInteractionEnabled = true
+        // These views sit on top of the pager and the zoom surface. A text view is a
+        // scroll view, so every recognized rectangle installed its own pan recognizer
+        // and swallowed page swipes and zoom pans that happened to start on text.
+        // Selection needs neither scrolling nor panning, so both are switched off — the
+        // selection and edit-menu interactions are untouched.
+        textView.isScrollEnabled = false
+        textView.panGestureRecognizer.isEnabled = false
+
+        let editMenuInteraction = UIEditMenuInteraction(delegate: context.coordinator)
+        textView.addInteraction(editMenuInteraction)
+        context.coordinator.editMenuInteraction = editMenuInteraction
+
         let tap = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.onTap(sender:))
         )
-        textView.isUserInteractionEnabled = true
         textView.addGestureRecognizer(tap)
         return textView
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
-        uiView.text = text
+        context.coordinator.highLightView = self
+        // Reassigning the text clears the selection, so recycled cells only rewrite it
+        // when the recognized string actually changed.
+        let newText = sanitizedText
+        if uiView.text != newText {
+            uiView.text = newText
+        }
     }
 }
 
