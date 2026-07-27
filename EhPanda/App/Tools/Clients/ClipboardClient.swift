@@ -31,15 +31,22 @@ extension ClipboardClient {
         saveText: { text in
             UIPasteboard.general.string = text
         },
+        // Encoding is expensive enough to keep off the main thread, but UIPasteboard is
+        // UIKit state and must only be mutated on the main actor; the animated branch
+        // previously did both on a global utility queue.
         saveImage: { (image, isAnimated) in
-            if isAnimated {
-                DispatchQueue.global(qos: .utility).async {
-                    if let data = image.kf.data(format: .GIF) {
+            Task {
+                let data: Data? = isAnimated
+                    ? await Task.detached(priority: .utility) { image.kf.data(format: .GIF) }.value
+                    : nil
+                await MainActor.run {
+                    if isAnimated {
+                        guard let data else { return }
                         UIPasteboard.general.setData(data, forPasteboardType: UTType.gif.identifier)
+                    } else {
+                        UIPasteboard.general.image = image
                     }
                 }
-            } else {
-                UIPasteboard.general.image = image
             }
         }
     )

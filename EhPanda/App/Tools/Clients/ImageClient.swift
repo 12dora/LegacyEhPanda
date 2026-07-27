@@ -11,10 +11,11 @@ import Combine
 import Kingfisher
 import KingfisherWebP
 import ComposableArchitecture
+import UniformTypeIdentifiers
 
 struct ImageClient {
     let prefetchImages: ([URL]) -> Void
-    let saveImageToPhotoLibrary: (UIImage, Bool) async -> Bool
+    let saveImageToPhotoLibrary: (ReaderImageAsset, URL?) async -> Bool
     let downloadImage: (URL) async -> Result<UIImage, Error>
     let retrieveImage: (String) async -> Result<UIImage, Error>
     let loadReaderImageAsset:
@@ -28,19 +29,26 @@ extension ImageClient {
                 ReaderImagePrefetchCoordinator.shared.update(urls: urls)
             }
         },
-        saveImageToPhotoLibrary: { (image, isAnimated) in
-            await withCheckedContinuation { continuation in
-                if let data = image.kf.data(format: isAnimated ? .GIF : .unknown) {
+        // The original container is always attempted first so "Save Original" really
+        // saves the original. Only if the photo library refuses it — WebP is the one
+        // reader format it is not documented to accept — is the re-encode attempted,
+        // so preservation is decided by the OS at runtime instead of being assumed.
+        saveImageToPhotoLibrary: { (asset, sourceURL) in
+            for export in asset.photoLibraryExports(sourceURL: sourceURL) {
+                let isSuccess = await withCheckedContinuation { continuation in
                     PHPhotoLibrary.shared().performChanges {
                         let request = PHAssetCreationRequest.forAsset()
-                        request.addResource(with: .photo, data: data, options: nil)
+                        let options = PHAssetResourceCreationOptions()
+                        options.originalFilename = export.filename
+                        options.uniformTypeIdentifier = export.uti
+                        request.addResource(with: .photo, data: export.data, options: options)
                     } completionHandler: { (isSuccess, _) in
                         continuation.resume(returning: isSuccess)
                     }
-                } else {
-                    continuation.resume(returning: false)
                 }
+                if isSuccess { return true }
             }
+            return false
         },
         downloadImage: { url in
             await withCheckedContinuation { continuation in
@@ -86,13 +94,6 @@ extension ImageClient {
     )
 
     func fetchImage(url: URL) async -> Result<UIImage, Error> {
-        if !url.isFileURL {
-            for key in [url.stableImageCacheKey, url.absoluteString].compactMap({ $0 }) {
-                if case .success(let image) = await retrieveImage(key) {
-                    return .success(image)
-                }
-            }
-        }
         switch await loadReaderImageAsset(url, nil) {
         case .success(let asset):
             return .success(asset.image)
@@ -100,29 +101,97 @@ extension ImageClient {
             return .failure(error)
         }
     }
+}
 
-    func fetchReaderImage(
-        url: URL,
-        onProgress: (@MainActor (Double) -> Void)? = nil
-    ) async -> Result<ReaderImageAsset, Error> {
-        await loadReaderImageAsset(url, onProgress)
+// MARK: Export
+// A page's source container carries its metadata, colour profile and size. Reducing it
+// to a UIImage and letting Kingfisher re-encode with `.unknown` produced a PNG for every
+// JPEG/WebP page, which is the opposite of "Save Original".
+private enum ReaderImageFileFormat {
+    case jpeg, png, gif, webP, heic
+
+    var uti: String {
+        switch self {
+        case .jpeg:
+            return UTType.jpeg.identifier
+        case .png:
+            return UTType.png.identifier
+        case .gif:
+            return UTType.gif.identifier
+        case .webP:
+            return UTType.webP.identifier
+        case .heic:
+            return UTType.heic.identifier
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .jpeg:
+            return "jpg"
+        case .png:
+            return "png"
+        case .gif:
+            return "gif"
+        case .webP:
+            return "webp"
+        case .heic:
+            return "heic"
+        }
+    }
+
+    init?(data: Data) {
+        func matches(_ bytes: [UInt8], at offset: Int) -> Bool {
+            guard data.count >= offset + bytes.count else { return false }
+            let start = data.index(data.startIndex, offsetBy: offset)
+            let end = data.index(start, offsetBy: bytes.count)
+            return Array(data[start..<end]) == bytes
+        }
+        if matches([0xFF, 0xD8, 0xFF], at: 0) {
+            self = .jpeg
+        } else if matches([0x89, 0x50, 0x4E, 0x47], at: 0) {
+            self = .png
+        } else if matches([0x47, 0x49, 0x46, 0x38], at: 0) {
+            self = .gif
+        } else if matches(Array("RIFF".utf8), at: 0), matches(Array("WEBP".utf8), at: 8) {
+            self = .webP
+        } else if matches(Array("ftypheic".utf8), at: 4) || matches(Array("ftypheix".utf8), at: 4)
+                    || matches(Array("ftypmif1".utf8), at: 4) || matches(Array("ftypmsf1".utf8), at: 4) {
+            self = .heic
+        } else {
+            return nil
+        }
     }
 }
 
-private final class ImageSaver: NSObject {
-    private let completion: (Bool) -> Void
+private struct ReaderImageExport {
+    let data: Data
+    let uti: String
+    let filename: String
+}
 
-    init(completion: @escaping (Bool) -> Void) {
-        self.completion = completion
-    }
-
-    func saveImage(_ image: UIImage) {
-        UIImageWriteToSavedPhotosAlbum(image, self, #selector(didFinishSavingImage), nil)
-    }
-    @objc func didFinishSavingImage(
-        _ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeRawPointer
-    ) {
-        completion(error == nil)
+private extension ReaderImageAsset {
+    // Ordered candidates: the source container first, a re-encode as the fallback the
+    // photo library is guaranteed to accept.
+    func photoLibraryExports(sourceURL: URL?) -> [ReaderImageExport] {
+        let stem = sourceURL.map { $0.deletingPathExtension().lastPathComponent } ?? ""
+        let base = stem.isEmpty ? "image" : stem
+        var exports = [ReaderImageExport]()
+        let sourceFormat = ReaderImageFileFormat(data: data)
+        if let sourceFormat {
+            exports.append(.init(
+                data: data, uti: sourceFormat.uti, filename: "\(base).\(sourceFormat.fileExtension)"
+            ))
+        }
+        let fallbackFormat: ReaderImageFileFormat = isAnimated ? .gif : .png
+        guard fallbackFormat != sourceFormat,
+              let encoded = image.kf.data(format: isAnimated ? .GIF : .unknown)
+        else { return exports }
+        exports.append(.init(
+            data: encoded, uti: fallbackFormat.uti,
+            filename: "\(base).\(fallbackFormat.fileExtension)"
+        ))
+        return exports
     }
 }
 

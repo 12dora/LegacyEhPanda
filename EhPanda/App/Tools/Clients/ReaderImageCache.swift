@@ -207,17 +207,40 @@ extension URL {
     // Reserving this aspect ratio before decoding prevents iOS 16 LazyVStack
     // from shifting the viewport when a placeholder becomes the real image.
     var readerImageAspectRatio: CGFloat? {
+        guard let size = readerImagePixelSize else { return nil }
+        return CGFloat(size.width) / CGFloat(size.height)
+    }
+
+    // The same fields give the decoded cost of a page before a single byte is
+    // fetched, which is what the prefetch window has to be budgeted against.
+    var readerImageDecodedPixelCount: Int? {
+        guard let size = readerImagePixelSize else { return nil }
+        // The dimensions come from an untrusted path component, so the product is
+        // computed with overflow reporting and rejected rather than trapped on.
+        let (product, overflowed) = size.width.multipliedReportingOverflow(by: size.height)
+        guard !overflowed else { return nil }
+        return min(product, Self.maxPlausibleImagePixelCount)
+    }
+
+    // A 30000x30000 page is already far beyond anything the site serves; anything
+    // larger is malformed or hostile and must not reach a budget calculation.
+    private static let maxPlausibleImageDimension = 30_000
+    private static let maxPlausibleImagePixelCount = 30_000 * 30_000
+
+    private var readerImagePixelSize: (width: Int, height: Int)? {
         let supportedFormats = ["jpg", "jpeg", "png", "gif", "webp"]
         for component in pathComponents.reversed() {
             let fields = component.split(separator: "-")
             guard fields.count >= 5,
                   let format = fields.last?.lowercased(),
                   supportedFormats.contains(String(format)),
-                  let width = Double(fields[fields.count - 3]),
-                  let height = Double(fields[fields.count - 2]),
-                  width > 0, height > 0
+                  let width = Int(fields[fields.count - 3]),
+                  let height = Int(fields[fields.count - 2]),
+                  width > 0, height > 0,
+                  width <= Self.maxPlausibleImageDimension,
+                  height <= Self.maxPlausibleImageDimension
             else { continue }
-            return CGFloat(width / height)
+            return (width, height)
         }
         return nil
     }
@@ -266,6 +289,118 @@ struct ReaderImageAsset {
     }
 }
 
+// The site answers quota exhaustion and expired sessions with fixed error artwork.
+// Those bytes decode successfully, so only their fingerprint distinguishes them from
+// a real page.
+enum ReaderImagePlaceholderFingerprint {
+    private static let fingerprints: [(count: Int, sha1: String)] = [
+        (144_844, "e48ed350e902a51581246d2a764fa7827e8e6988"),
+        (28_658, "f54b887b017694dc25eb1a1404f71981885f8ed9")
+    ]
+
+    static func matches(_ data: Data) -> Bool {
+        guard let fingerprint = fingerprints.first(where: { $0.count == data.count }) else {
+            return false
+        }
+        let sha1 = Insecure.SHA1.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return sha1 == fingerprint.sha1
+    }
+}
+
+extension Data {
+    // The byte-only prefetch never decodes, so a container sniff replaces the decode
+    // as the check that only plausible image bytes reach the shared page cache.
+    var looksLikeReaderImageData: Bool {
+        let signatures: [(offset: Int, bytes: [UInt8])] = [
+            (0, [0xFF, 0xD8, 0xFF]),                // JPEG
+            (0, [0x89, 0x50, 0x4E, 0x47]),          // PNG
+            (0, [0x47, 0x49, 0x46, 0x38]),          // GIF
+            (0, Array("RIFF".utf8)),                // WebP (RIFF container)
+            (4, Array("ftyp".utf8))                 // HEIF/HEIC
+        ]
+        return signatures.contains { signature in
+            guard count >= signature.offset + signature.bytes.count else { return false }
+            let start = index(startIndex, offsetBy: signature.offset)
+            let end = index(start, offsetBy: signature.bytes.count)
+            return Array(self[start..<end]) == signature.bytes
+        }
+    }
+}
+
+// Prefetching wants the bytes and nothing else, but `ImageDownloader` treats a nil
+// processor result as a failure and would otherwise drop the data. WebPProcessor fully
+// decodes a WebP frame before the original data is even handed back, which is exactly
+// the decode burst prefetching is supposed to avoid, so the prefetch path substitutes a
+// zero-cost placeholder image and keeps `originalData`. Its identifier never reaches a
+// cache: the coordinator stores the bytes itself under the display processor's key.
+struct ReaderBytesOnlyProcessor: ImageProcessor {
+    static let `default` = ReaderBytesOnlyProcessor()
+
+    let identifier = "com.ehpanda.readerBytesOnlyProcessor"
+    private static let placeholder = UIImage()
+
+    func process(item: ImageProcessItem, options: KingfisherParsedOptionsInfo) -> KFCrossPlatformImage? {
+        switch item {
+        case .image(let image):
+            return image
+        case .data:
+            return Self.placeholder
+        }
+    }
+}
+
+// The disk cache can still hold placeholder bytes written before the download guard
+// below existed. A cache serializer is the single point every disk read and write passes
+// through and, unlike a processor, it is not part of the cache key, so validating here
+// turns a poisoned entry into an ordinary cache miss without invalidating correctly
+// cached pages.
+struct ReaderImageCacheSerializer: CacheSerializer {
+    static let `default` = ReaderImageCacheSerializer()
+
+    var originalDataUsed: Bool { WebPSerializer.default.originalDataUsed }
+
+    func data(with image: KFCrossPlatformImage, original: Data?) -> Data? {
+        if let original, ReaderImagePlaceholderFingerprint.matches(original) { return nil }
+        return WebPSerializer.default.data(with: image, original: original)
+    }
+
+    func image(with data: Data, options: KingfisherParsedOptionsInfo) -> KFCrossPlatformImage? {
+        guard !ReaderImagePlaceholderFingerprint.matches(data) else { return nil }
+        return WebPSerializer.default.image(with: data, options: options)
+    }
+}
+
+// Display, prefetch and the reader pipeline all download through the shared Kingfisher
+// downloader, so validating here is the only place that covers every caller. The URL is
+// available at this stage, which is what makes it possible to evict both the stable page
+// key and the absolute key before the transfer is reported as a retryable failure
+// instead of being cached and rendered as a successful page.
+final class ReaderImagePlaceholderGuard: ImageDownloaderDelegate {
+    static let shared = ReaderImagePlaceholderGuard()
+
+    private static let processorIdentifiers = [
+        WebPProcessor.default.identifier, DefaultImageProcessor.default.identifier
+    ]
+
+    func imageDownloader(_ downloader: ImageDownloader, didDownload data: Data, for url: URL) -> Data? {
+        guard ReaderImagePlaceholderFingerprint.matches(data) else { return data }
+        let keys = url.readerImageCacheKeys
+        let cache = KingfisherManager.shared.cache
+        for key in keys {
+            for identifier in Self.processorIdentifiers {
+                cache.removeImage(forKey: key, processorIdentifier: identifier)
+            }
+        }
+        Task { await ReaderImageDataCache.shared.removeData(forKeys: keys) }
+        Logger.error("Rejected known site placeholder", context: [
+            "host": url.host ?? "nil", "byteCount": data.count
+        ])
+        return nil
+    }
+}
+
 private struct DownloadedReaderImage {
     let image: UIImage
     let data: Data
@@ -279,13 +414,28 @@ actor ReaderImagePipeline {
         var waiters: Set<UUID>
     }
 
+    // Offline pages never reach the byte/decoded caches above, because they are not
+    // downloaded and their file URL is not a stable page key. Without this entry every
+    // auxiliary action (OCR, copy, save, share) reread and redecoded the whole page.
+    private final class LocalAssetEntry {
+        let image: UIImage
+        let data: Data
+
+        init(image: UIImage, data: Data) {
+            self.image = image
+            self.data = data
+        }
+    }
+
     private let dataCache: ReaderImageDataCache
     private let decodedCache = NSCache<NSString, UIImage>()
+    private let localAssets = NSCache<NSString, LocalAssetEntry>()
     private var transfers = [String: Transfer]()
 
     init(dataCache: ReaderImageDataCache = .shared) {
         self.dataCache = dataCache
         decodedCache.totalCostLimit = 96 * 1_024 * 1_024
+        localAssets.totalCostLimit = 48 * 1_024 * 1_024
     }
 
     func asset(
@@ -295,12 +445,12 @@ actor ReaderImagePipeline {
     ) async throws -> ReaderImageAsset {
         let keys = url.readerImageCacheKeys
         let primaryKey = keys[0]
-        if let image = decodedCache.object(forKey: primaryKey as NSString),
-           let data = await dataCache.data(forKeys: keys) {
-            return ReaderImageAsset(image: image, data: data)
-        }
 
         if url.isFileURL {
+            let localKey = Self.localAssetKey(for: url)
+            if let localKey, let entry = localAssets.object(forKey: localKey as NSString) {
+                return ReaderImageAsset(image: entry.image, data: entry.data)
+            }
             let data = try await Task.detached(priority: priority) {
                 try Data(contentsOf: url, options: .mappedIfSafe)
             }.value
@@ -308,6 +458,21 @@ actor ReaderImagePipeline {
                   let image = await Self.decode(data, priority: priority)
             else { throw AppError.parseFailed }
             cacheDecoded(image, data: data, key: primaryKey)
+            if let localKey {
+                // The entry retains the decoded bitmap, so the cost has to be the
+                // decoded pixels plus the source bytes; charging `data.count` alone
+                // let twenty compressed pages retain hundreds of MB of pixels.
+                localAssets.setObject(
+                    LocalAssetEntry(image: image, data: data),
+                    forKey: localKey as NSString,
+                    cost: Self.decodedByteCost(of: image) + data.count
+                )
+            }
+            return ReaderImageAsset(image: image, data: data)
+        }
+
+        if let image = decodedCache.object(forKey: primaryKey as NSString),
+           let data = await dataCache.data(forKeys: keys) {
             return ReaderImageAsset(image: image, data: data)
         }
 
@@ -322,8 +487,11 @@ actor ReaderImagePipeline {
             await dataCache.removeData(forKeys: keys)
         }
 
+        // Coalesce by the stable page key, not by the absolute URL: a renewed H@H
+        // signature produces a different absolute URL for the very same page, and
+        // keying by it duplicated the download and the decode.
         let download = try await transferData(
-            for: url, key: url.absoluteString, priority: priority, onProgress: onProgress
+            for: url, key: primaryKey, priority: priority, onProgress: onProgress
         )
         try Task.checkCancellation()
         guard !Self.isKnownSitePlaceholder(download.data) else { throw AppError.parseFailed }
@@ -334,13 +502,34 @@ actor ReaderImagePipeline {
     }
 
     private func cacheDecoded(_ image: UIImage, data: Data, key: String) {
-        let pixelCost = Int(image.size.width * image.scale * image.size.height * image.scale * 4)
-        decodedCache.setObject(image, forKey: key as NSString, cost: pixelCost)
+        decodedCache.setObject(image, forKey: key as NSString, cost: Self.decodedByteCost(of: image))
+    }
+
+    // Bytes of decoded pixels the image retains, animated frames included. NSCache
+    // limits only bound what they are told about, so every cache holding a decoded
+    // page has to charge this rather than the compressed size.
+    private static func decodedByteCost(of image: UIImage) -> Int {
+        let width = Double(image.size.width * image.scale)
+        let height = Double(image.size.height * image.scale)
+        let frameCount = max(1, image.kf.imageFrameCount ?? image.images?.count ?? 1)
+        let bytes = width * height * 4 * Double(frameCount)
+        guard bytes.isFinite, bytes > 0 else { return 1 }
+        return Int(min(bytes, Double(Int.max / 2)))
     }
 
     func removeAllMemory() async {
         decodedCache.removeAllObjects()
+        localAssets.removeAllObjects()
         await dataCache.removeAllMemory()
+    }
+
+    // Canonical path plus the identity-bearing file metadata, so a repaired or
+    // re-downloaded page invalidates its entry instead of serving stale bytes.
+    private static func localAssetKey(for url: URL) -> String? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        guard let size = values?.fileSize else { return nil }
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(url.standardizedFileURL.path)|\(size)|\(modified)"
     }
 
     private func transferData(
@@ -471,18 +660,8 @@ actor ReaderImagePipeline {
         }.value
     }
 
-    private static func isKnownSitePlaceholder(_ data: Data) -> Bool {
-        let fingerprints: [(count: Int, sha1: String)] = [
-            (144_844, "e48ed350e902a51581246d2a764fa7827e8e6988"),
-            (28_658, "f54b887b017694dc25eb1a1404f71981885f8ed9")
-        ]
-        guard let fingerprint = fingerprints.first(where: { $0.count == data.count }) else {
-            return false
-        }
-        let sha1 = Insecure.SHA1.hash(data: data)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return sha1 == fingerprint.sha1
+    static func isKnownSitePlaceholder(_ data: Data) -> Bool {
+        ReaderImagePlaceholderFingerprint.matches(data)
     }
 }
 
@@ -516,9 +695,14 @@ private final class ReaderImageDownloadTaskHolder {
     }
 }
 
-// Reuse Kingfisher's cache-aware prefetch path. The previous custom transfer actor
-// bypassed ImageCache, so already cached pages were downloaded again and stale
-// persisted H@H URLs failed even when their images were available on disk.
+// Prefetching warms *bytes*, not bitmaps. The previous prefetcher decoded up to three
+// full-resolution pages concurrently and put them in the memory cache, which on a
+// 2400x3600 gallery is roughly 100 MB before neighbours, SwiftUI, OCR or export are
+// accounted for. Kingfisher serializes reader pages as their original data anyway
+// (WebPSerializer keeps the original bytes), so storing the downloaded data under the
+// exact key/processor identifier the display path reads back is equivalent to what the
+// prefetcher used to write — minus the eager full-size decode. The single
+// full-resolution decode is left to the page actually being displayed or exported.
 //
 // Prefetches are incremental: turning a page keeps overlapping neighbour downloads
 // running instead of cancelling and restarting them from byte zero, which previously
@@ -527,56 +711,145 @@ private final class ReaderImageDownloadTaskHolder {
 final class ReaderImagePrefetchCoordinator {
     static let shared = ReaderImagePrefetchCoordinator()
 
+    private struct Candidate {
+        let key: String
+        let url: URL
+        let pixelCount: Int
+    }
+
     private static let maxTrackedURLs = 10
     private static let maxConcurrentPrefetches = 3
+    private static let assumedPixelCount = 2_400 * 3_600
+    // Pages a reader may be holding warm at once, measured in decoded pixels rather
+    // than in page counts, so high-resolution galleries shorten the window themselves.
+    private static let basePixelBudget = 24_000_000
+    private static let memoryPressureCooldown: TimeInterval = 30
 
-    private var pending = [(key: String, resource: KF.ImageResource)]()
-    private var activePrefetchers = [String: ImagePrefetcher]()
+    private var pending = [Candidate]()
+    private var activeTasks = [String: DownloadTask]()
     private var wantedKeys = Set<String>()
+    private var memoryPressureUntil: Date?
 
     func update(urls: [URL]) {
         var seen = Set<String>()
-        let resources: [(key: String, resource: KF.ImageResource)] = urls
-            .prefix(Self.maxTrackedURLs)
-            .compactMap { url in
-                guard !url.isFileURL else { return nil }
-                let key = url.stableImageCacheKey ?? url.absoluteString
-                guard seen.insert(key).inserted else { return nil }
-                return (key, KF.ImageResource(downloadURL: url, cacheKey: key))
-            }
-        wantedKeys = seen
+        var candidates = [Candidate]()
+        var pixels = 0
+        let trackedLimit = trackedURLLimit
+        let budget = pixelBudget
 
-        for (key, prefetcher) in activePrefetchers where !wantedKeys.contains(key) {
-            prefetcher.stop()
-            activePrefetchers[key] = nil
+        for url in urls where !url.isFileURL {
+            guard candidates.count < trackedLimit else { break }
+            let key = url.stableImageCacheKey ?? url.absoluteString
+            guard seen.insert(key).inserted else { continue }
+            let pixelCount = url.readerImageDecodedPixelCount ?? Self.assumedPixelCount
+            if !candidates.isEmpty, pixels + pixelCount > budget { break }
+            pixels += pixelCount
+            candidates.append(.init(key: key, url: url, pixelCount: pixelCount))
         }
-        pending = resources.filter { activePrefetchers[$0.key] == nil }
+        wantedKeys = Set(candidates.map(\.key))
+
+        for (key, task) in activeTasks where !wantedKeys.contains(key) {
+            task.cancel()
+            activeTasks[key] = nil
+        }
+        pending = candidates.filter { activeTasks[$0.key] == nil && !Self.isCached($0.key) }
         startNextIfPossible()
     }
 
+    // Drop every speculative transfer without changing how aggressively the next window
+    // may be refilled. This is what a user-initiated cache clear needs: nothing must
+    // repopulate the stores mid-clear, but prefetching afterwards is legitimate.
+    func stopAll() {
+        activeTasks.values.forEach { $0.cancel() }
+        activeTasks.removeAll()
+        pending.removeAll()
+        wantedKeys.removeAll()
+    }
+
+    // A memory warning means the reader is already over budget; stop everything and
+    // stay conservative for a while instead of immediately refilling.
+    func handleMemoryPressure() {
+        memoryPressureUntil = Date().addingTimeInterval(Self.memoryPressureCooldown)
+        stopAll()
+    }
+
+    private var isUnderMemoryPressure: Bool {
+        guard let memoryPressureUntil else { return false }
+        return Date() < memoryPressureUntil
+    }
+
+    private var pressureScale: Double {
+        var scale: Double
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal:
+            scale = 1
+        case .fair:
+            scale = 0.7
+        case .serious:
+            scale = 0.4
+        case .critical:
+            scale = 0.2
+        @unknown default:
+            scale = 0.5
+        }
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { scale *= 0.5 }
+        if isUnderMemoryPressure { scale *= 0.5 }
+        return scale
+    }
+
+    private var trackedURLLimit: Int {
+        max(1, Int((Double(Self.maxTrackedURLs) * pressureScale).rounded()))
+    }
+    private var concurrencyLimit: Int {
+        max(1, Int((Double(Self.maxConcurrentPrefetches) * pressureScale).rounded()))
+    }
+    private var pixelBudget: Int {
+        max(Self.assumedPixelCount, Int(Double(Self.basePixelBudget) * pressureScale))
+    }
+
+    private static func isCached(_ key: String) -> Bool {
+        KingfisherManager.shared.cache.imageCachedType(
+            forKey: key, processorIdentifier: WebPProcessor.default.identifier
+        ).cached
+    }
+
     private func startNextIfPossible() {
-        while activePrefetchers.count < Self.maxConcurrentPrefetches, !pending.isEmpty {
+        let limit = concurrencyLimit
+        while activeTasks.count < limit, !pending.isEmpty {
             let next = pending.removeFirst()
-            guard wantedKeys.contains(next.key), activePrefetchers[next.key] == nil else { continue }
-            let prefetcher = ImagePrefetcher(
-                resources: [next.resource],
-                options: [
-                    .processor(WebPProcessor.default),
-                    .cacheSerializer(WebPSerializer.default),
-                    .backgroundDecode,
-                    .downloadPriority(0.2),
-                    .retryStrategy(DelayRetryStrategy(maxRetryCount: 1, retryInterval: .seconds(1)))
-                ]
-            ) { [weak self] _, _, _ in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.activePrefetchers[next.key] = nil
-                    self.startNextIfPossible()
+            guard wantedKeys.contains(next.key), activeTasks[next.key] == nil else { continue }
+            guard let task = Self.startTransfer(next) else { continue }
+            activeTasks[next.key] = task
+        }
+    }
+
+    private static func startTransfer(_ candidate: Candidate) -> DownloadTask? {
+        KingfisherManager.shared.downloader.downloadImage(
+            with: candidate.url,
+            options: [
+                .processor(ReaderBytesOnlyProcessor.default),
+                .downloadPriority(0.2),
+                .callbackQueue(.untouch)
+            ],
+            progressBlock: nil,
+            completionHandler: { result in
+                if case .success(let value) = result, value.originalData.looksLikeReaderImageData {
+                    KingfisherManager.shared.cache.storeToDisk(
+                        value.originalData,
+                        forKey: candidate.key,
+                        processorIdentifier: WebPProcessor.default.identifier
+                    )
+                }
+                Task { @MainActor in
+                    ReaderImagePrefetchCoordinator.shared.finish(key: candidate.key)
                 }
             }
-            activePrefetchers[next.key] = prefetcher
-            prefetcher.start()
-        }
+        )
+    }
+
+    private func finish(key: String) {
+        activeTasks[key] = nil
+        startNextIfPossible()
     }
 }
 
@@ -584,15 +857,21 @@ final class ReaderImagePrefetchCoordinator {
 final class ReaderImageCacheLifecycle {
     static let shared = ReaderImageCacheLifecycle()
     private var observers = [NSObjectProtocol]()
+    // ImageDownloader keeps its delegate weakly.
+    private let placeholderGuard = ReaderImagePlaceholderGuard.shared
 
     private init() {
+        KingfisherManager.shared.downloader.delegate = placeholderGuard
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
             queue: .main
         ) { _ in
-            Task { await ReaderImagePipeline.shared.removeAllMemory() }
+            Task { @MainActor in
+                ReaderImagePrefetchCoordinator.shared.handleMemoryPressure()
+                await ReaderImagePipeline.shared.removeAllMemory()
+            }
         })
         observers.append(center.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,

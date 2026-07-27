@@ -214,8 +214,18 @@ final class AdvancedListScrollCoordinator: ObservableObject {
         pinAttempts = 0
         pinSettledPasses = 0
         pinDeadlineRetries = 0
-        proxy.scrollTo(pageID, anchor: .center)
+        proxy.scrollTo(pageID, anchor: jumpAnchor(for: pageID))
         schedulePinDeadline()
+    }
+
+    // A page taller than the viewport cannot be centered without pushing its top edge
+    // above the viewport, which is exactly the beginning the reader asked to jump to.
+    // Pages that do fit keep the previous centered behaviour.
+    private func jumpAnchor(for pageID: Int) -> UnitPoint {
+        guard let frame = latestFrames[pageID], !frame.isNull, !frame.isEmpty,
+              viewportSize.height > 0, frame.height > viewportSize.height
+        else { return .center }
+        return .top
     }
 
     private func continuePin(proxy: ScrollViewProxy) {
@@ -242,7 +252,7 @@ final class AdvancedListScrollCoordinator: ObservableObject {
         if latestFrames[target] == nil, pinAttempts >= 3 {
             applyEstimatedOffset()
         }
-        proxy.scrollTo(target, anchor: .center)
+        proxy.scrollTo(target, anchor: jumpAnchor(for: target))
     }
 
     private func isPinTargetSettled(_ target: Int) -> Bool {
@@ -250,17 +260,34 @@ final class AdvancedListScrollCoordinator: ObservableObject {
         guard viewport.height > 0, let frame = latestFrames[target],
               !frame.isNull, !frame.isEmpty
         else { return false }
+        if frame.height > viewport.height {
+            // Tall pages are top-aligned, so settlement is measured against top edges;
+            // a center-based check accepts a page whose top is above the viewport.
+            if abs(frame.minY - viewport.minY) <= max(24, viewport.height * 0.05) { return true }
+            // The generic boundary fallback must not accept a tall page here: a last
+            // page first centered against the bottom boundary has its top above the
+            // viewport while the list can still scroll up toward it. Only accept when
+            // the list genuinely cannot move any further toward the page top.
+            return frame.minY > viewport.minY ? isAtBottomOffsetBoundary : isAtTopOffsetBoundary
+        }
         if abs(frame.midY - viewport.midY) <= max(24, frame.height * 0.25) { return true }
         // First and last pages cannot be centered; reaching the offset boundary with
         // the target visible is as settled as it gets.
         return frame.intersects(viewport) && isAtOffsetBoundary
     }
 
-    private var isAtOffsetBoundary: Bool {
+    private var isAtTopOffsetBoundary: Bool {
         guard let scrollView else { return true }
-        let offsetY = scrollView.contentOffset.y
-        return offsetY <= -scrollView.adjustedContentInset.top + 1
-            || offsetY >= clampedOffsetY(.greatestFiniteMagnitude, in: scrollView) - 1
+        return scrollView.contentOffset.y <= -scrollView.adjustedContentInset.top + 1
+    }
+
+    private var isAtBottomOffsetBoundary: Bool {
+        guard let scrollView else { return true }
+        return scrollView.contentOffset.y >= clampedOffsetY(.greatestFiniteMagnitude, in: scrollView) - 1
+    }
+
+    private var isAtOffsetBoundary: Bool {
+        isAtTopOffsetBoundary || isAtBottomOffsetBoundary
     }
 
     private func applyEstimatedOffset() {
@@ -289,7 +316,7 @@ final class AdvancedListScrollCoordinator: ObservableObject {
             if self.latestFrames[target] == nil {
                 self.applyEstimatedOffset()
             }
-            self.pinnedProxy?.scrollTo(target, anchor: .center)
+            self.pinnedProxy?.scrollTo(target, anchor: self.jumpAnchor(for: target))
             self.schedulePinDeadline()
         }
     }
