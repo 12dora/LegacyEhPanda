@@ -55,11 +55,15 @@ struct TagTranslation: Codable, Equatable, Hashable {
             * (range.lowerBound == value.startIndex ? 2.0 : 1.0)
         }
 
+        // The suggestion highlights `displayValue`, which is the rendered form of the Markdown in
+        // `value`. Ranges computed in the raw Markdown do not address the same characters, so both
+        // the match and its weight are computed in the string the range is applied to.
+        let renderedValue = displayValue
         var weight: Float = .zero
         let keyRange = key.range(of: keyword, options: .caseInsensitive)
-        let valueRange = value.range(of: keyword, options: .caseInsensitive)
+        let valueRange = renderedValue.range(of: keyword, options: .caseInsensitive)
         if let range = keyRange { weight += getWeight(value: key, range: range) }
-        if let range = valueRange { weight += getWeight(value: value, range: range) }
+        if let range = valueRange { weight += getWeight(value: renderedValue, range: range) }
         return .init(
             tag: self, weight: weight, keyRange: keyRange, valueRange: valueRange,
             originalKeyword: originalKeyword, matchesNamespace: matchesNamespace

@@ -7,6 +7,7 @@
 
 import Combine
 import Foundation
+import CryptoKit
 import ComposableArchitecture
 
 struct FileClient {
@@ -77,7 +78,28 @@ extension FileClient {
                 continuation.resume(returning: .failure(.parseFailed))
                 return
             }
-                continuation.resume(returning: .success(.init(hasCustomTranslations: true, translations: translations)))
+                let revisionSource = translations
+                    .sorted { lhs, rhs in lhs.key < rhs.key }
+                    .map { key, translation in
+                        [
+                            key,
+                            translation.namespace.rawValue,
+                            translation.key,
+                            translation.value,
+                            translation.description ?? "",
+                            translation.linksString ?? ""
+                        ]
+                        .joined(separator: "\u{1F}")
+                    }
+                    .joined(separator: "\u{1E}")
+                let digestPrefix = SHA256.hash(data: Data(revisionSource.utf8))
+                    .prefix(6)
+                    .reduce(0) { ($0 << 8) + Int($1) }
+                let revisionSeconds = digestPrefix % 4_000_000_000
+                let updatedDate = Date(timeIntervalSince1970: TimeInterval(revisionSeconds))
+                continuation.resume(returning: .success(.init(
+                    hasCustomTranslations: true, updatedDate: updatedDate, translations: translations
+                )))
             }
         }
     )

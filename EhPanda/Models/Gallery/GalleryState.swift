@@ -64,6 +64,45 @@ struct GalleryTag: Codable, Equatable, Hashable, Identifiable {
         let isVotedDown: Bool
         let textColor: Color?
         let backgroundColor: Color?
+
+        init(
+            rawNamespace: String, text: String, isVotedUp: Bool, isVotedDown: Bool,
+            textColor: Color?, backgroundColor: Color?
+        ) {
+            self.rawNamespace = rawNamespace
+            self.text = text
+            self.isVotedUp = isVotedUp
+            self.isVotedDown = isVotedDown
+            self.textColor = textColor
+            self.backgroundColor = backgroundColor
+        }
+
+        // Colors travel through the project's own `CodableColor` instead of a retroactive
+        // conformance on the imported `Color`. The encoded shape is unchanged.
+        private enum CodingKeys: String, CodingKey {
+            case rawNamespace, text, isVotedUp, isVotedDown, textColor, backgroundColor
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            rawNamespace = try container.decode(String.self, forKey: .rawNamespace)
+            text = try container.decode(String.self, forKey: .text)
+            isVotedUp = try container.decode(Bool.self, forKey: .isVotedUp)
+            isVotedDown = try container.decode(Bool.self, forKey: .isVotedDown)
+            textColor = try container.decodeIfPresent(CodableColor.self, forKey: .textColor)?.color
+            backgroundColor = try container
+                .decodeIfPresent(CodableColor.self, forKey: .backgroundColor)?.color
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(rawNamespace, forKey: .rawNamespace)
+            try container.encode(text, forKey: .text)
+            try container.encode(isVotedUp, forKey: .isVotedUp)
+            try container.encode(isVotedDown, forKey: .isVotedDown)
+            try container.encodeIfPresent(CodableColor(textColor), forKey: .textColor)
+            try container.encodeIfPresent(CodableColor(backgroundColor), forKey: .backgroundColor)
+        }
     }
 
     var id: String { rawNamespace }

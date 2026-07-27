@@ -8,8 +8,17 @@
 import SwiftUI
 
 struct Gallery: Identifiable, Codable, Equatable, Hashable {
+    // A gallery is an identity value: everywhere galleries are collected, deduplicated or diffed
+    // they stand for one gallery on the site, which the GID identifies. Equality and hashing have
+    // to agree on that, otherwise the synthesized hash (which mixes in every field) would break the
+    // "equal values hash equally" requirement that Set, Dictionary and SwiftUI's identity map rely
+    // on. Note that this deliberately makes two payloads of the same gallery interchangeable, so
+    // refreshed metadata has to be applied by replacing the element, not by comparing it.
     static func == (lhs: Gallery, rhs: Gallery) -> Bool {
         lhs.gid == rhs.gid
+    }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(gid)
     }
 
     static func mockGalleries(count: Int, randomID: Bool = true) -> [Gallery] {
@@ -86,6 +95,54 @@ struct Gallery: Identifiable, Codable, Equatable, Hashable {
     let coverURL: URL?
     let galleryURL: URL?
     var lastOpenDate: Date?
+
+    // Every gallery has at least one page. A zero or negative count coming from unrecognized
+    // markup, a legacy database row or a decoded payload would reach the reader, which builds
+    // closed ranges from it, so it is normalized once here at the model boundary.
+    private static func validated(pageCount: Int) -> Int {
+        max(1, pageCount)
+    }
+
+    init(
+        gid: String, token: String, title: String, rating: Float, tags: [GalleryTag],
+        category: Category, uploader: String? = nil, pageCount: Int, postedDate: Date,
+        coverURL: URL?, galleryURL: URL?, lastOpenDate: Date? = nil
+    ) {
+        self.gid = gid
+        self.token = token
+        self.title = title
+        self.rating = rating
+        self.tags = tags
+        self.category = category
+        self.uploader = uploader
+        self.pageCount = Self.validated(pageCount: pageCount)
+        self.postedDate = postedDate
+        self.coverURL = coverURL
+        self.galleryURL = galleryURL
+        self.lastOpenDate = lastOpenDate
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case gid, token, title, rating, tags, category, uploader
+        case pageCount, postedDate, coverURL, galleryURL, lastOpenDate
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        gid = try container.decode(String.self, forKey: .gid)
+        token = try container.decode(String.self, forKey: .token)
+        title = try container.decode(String.self, forKey: .title)
+        rating = try container.decode(Float.self, forKey: .rating)
+        tags = try container.decode([GalleryTag].self, forKey: .tags)
+        category = try container.decode(Category.self, forKey: .category)
+        uploader = try container.decodeIfPresent(String.self, forKey: .uploader)
+        let decodedPageCount = try container.decode(Int.self, forKey: .pageCount)
+        pageCount = Self.validated(pageCount: decodedPageCount)
+        postedDate = try container.decode(Date.self, forKey: .postedDate)
+        coverURL = try container.decodeIfPresent(URL.self, forKey: .coverURL)
+        galleryURL = try container.decodeIfPresent(URL.self, forKey: .galleryURL)
+        lastOpenDate = try container.decodeIfPresent(Date.self, forKey: .lastOpenDate)
+    }
 }
 
 extension Gallery: DateFormattable, CustomStringConvertible {

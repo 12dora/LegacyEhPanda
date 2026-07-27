@@ -6,12 +6,41 @@
 //
 
 import Foundation
+import CryptoKit
 
 struct TagTranslator: Codable, Equatable {
     var language: TranslatableLanguage?
     var hasCustomTranslations = false
     var updatedDate: Date = .distantPast
     var translations = [String: TagTranslation]()
+
+    var revisionIdentifier: String {
+        let contentIdentity = translations
+            .sorted { lhs, rhs in lhs.key < rhs.key }
+            .map { key, translation in
+                [
+                    key,
+                    translation.namespace.rawValue,
+                    translation.key,
+                    translation.value,
+                    translation.description ?? "",
+                    translation.linksString ?? ""
+                ]
+                .joined(separator: "\u{1F}")
+            }
+            .joined(separator: "\u{1E}")
+        let digest = SHA256.hash(data: Data(contentIdentity.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return [
+            String(describing: language),
+            String(updatedDate.timeIntervalSince1970),
+            hasCustomTranslations ? "custom" : "default",
+            String(translations.count),
+            digest
+        ]
+        .joined(separator: "|")
+    }
 
     func lookup(word: String, returnOriginal: Bool) -> (String, TagTranslation?) {
         guard !returnOriginal else { return (word, nil) }

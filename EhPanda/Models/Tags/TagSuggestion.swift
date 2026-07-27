@@ -8,7 +8,11 @@
 import SwiftUI
 
 struct TagSuggestion: Equatable, Hashable, Identifiable {
-    let id: UUID = .init()
+    /// Identity is the tag being suggested. Suggestions are deduplicated by `searchKeyword`, so
+    /// this is unique within a result set; a random per-instance UUID gave every recomputation a
+    /// brand new identity and churned the rendered rows (and their images) on each keystroke.
+    var id: String { tag.searchKeyword }
+
     let tag: TagTranslation
     let weight: Float
     let keyRange: Range<String.Index>?

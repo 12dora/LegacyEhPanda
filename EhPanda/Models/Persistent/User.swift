@@ -31,10 +31,6 @@ struct User: Codable, Equatable {
 }
 
 enum FavoritesType: String, Codable, CaseIterable {
-    static func getTypeFrom(index: Int) -> FavoritesType {
-        FavoritesType.allCases.filter({ $0.index == index }).first ?? .all
-    }
-
     var index: Int {
         Int(rawValue.replacingOccurrences(of: "favorite_", with: "")) ?? -1
     }

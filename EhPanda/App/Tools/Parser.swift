@@ -54,7 +54,11 @@ struct Parser {
                     tmpPublishedDate = date
                 }
                 if let components = div.text?.split(separator: " "), components.count == 2,
-                   ["page", "pages"].contains(components[1]), let pageCount = Int(components[0])
+                   ["page", "pages"].contains(components[1]), let pageCount = Int(components[0]),
+                   // A gallery always has at least one page. Accepting zero or a negative count
+                   // here would let malformed markup reach the reader, which builds closed ranges
+                   // from it.
+                   pageCount > 0
                 {
                     tmpPageCount = pageCount
                 }
@@ -280,6 +284,23 @@ struct Parser {
             return galleries
         }
 
+        // A page that really is a gallery listing always renders the `itg` container, and an empty
+        // result set renders one of the site's explicit no-results messages. Anything else (a login
+        // wall, a maintenance notice, a redirect landing page or unrecognized markup drift) must be
+        // reported as a failure instead of being mistaken for "no results".
+        func isRecognizedListDocument(doc: HTMLDocument) -> Bool {
+            let listContainer = "//*[contains(concat(' ', normalize-space(@class), ' '), ' itg ')]"
+            if doc.at_xpath(listContainer) != nil { return true }
+            // The search navigation and the display mode selector are rendered by every listing
+            // page, including one whose result set is empty.
+            if doc.at_xpath("//div [@class='searchnav']") != nil || doc.at_xpath("//div [@id='dms']") != nil {
+                return true
+            }
+            guard let text = doc.body?.text?.lowercased() else { return false }
+            return ["no hits found", "no unfiltered results", "no galleries found"]
+                .contains { text.contains($0) }
+        }
+
         let galleries: [Gallery]
         switch try? parseDisplayMode(doc: doc) {
         case "Minimal":
@@ -293,12 +314,27 @@ struct Parser {
         case "Thumbnail":
             galleries = (try? parseThumbnailModeGalleries(doc: doc)) ?? []
         default:
-            // Toplists doesn't have a display mode selector and it's compact mode
-            galleries = (try? parseCompactModeGalleries(doc: doc)) ?? []
+            // Toplists doesn't have a display mode selector and it's compact mode. Any other
+            // unknown mode still has to resolve to one of the recognized layouts, so every parser
+            // is attempted before the document is considered unreadable.
+            var fallback = (try? parseCompactModeGalleries(doc: doc)) ?? []
+            if fallback.isEmpty {
+                fallback = (try? parseMinimalModeGalleries(doc: doc, parsesTags: true)) ?? []
+            }
+            if fallback.isEmpty {
+                fallback = (try? parseExtendedModeGalleries(doc: doc)) ?? []
+            }
+            if fallback.isEmpty {
+                fallback = (try? parseThumbnailModeGalleries(doc: doc)) ?? []
+            }
+            galleries = fallback
         }
 
-        if galleries.isEmpty, let banInterval = parseBanInterval(doc: doc) {
-            throw AppError.ipBanned(banInterval)
+        if galleries.isEmpty {
+            if let banInterval = parseBanInterval(doc: doc) {
+                throw AppError.ipBanned(banInterval)
+            }
+            guard isRecognizedListDocument(doc: doc) else { throw AppError.parseFailed }
         }
         return galleries
     }
@@ -668,20 +704,36 @@ struct Parser {
         var comments = [GalleryComment]()
         for link in doc.xpath("//div [@id='cdiv']") {
             for c1Link in link.xpath("//div [@class='c1']") {
-                guard let c3Node = c1Link.at_xpath("//div [@class='c3']")?.text,
+                guard let c3Link = c1Link.at_xpath("//div [@class='c3']"),
+                      let c3Text = c3Link.text,
                       let c6Node = c1Link.at_xpath("//div [@class='c6']"),
                       let commentID = c6Node["id"]?
                         .replacingOccurrences(of: "comment_", with: ""),
-                      let rangeA = c3Node.range(of: "Posted on "),
-                      let rangeB = c3Node.range(of: " by:   ")
+                      let rangeA = c3Text.range(of: "Posted on"),
+                      let rangeB = c3Text.range(
+                        of: "by:", range: rangeA.upperBound..<c3Text.endIndex
+                      )
                 else { continue }
 
                 var score: String?
                 if let c5Node = c1Link.at_xpath("//div [@class='c5 nosel']") {
                     score = c5Node.at_xpath("//span")?.text
                 }
-                let author = String(c3Node[rangeB.upperBound...])
-                let commentTime = String(c3Node[rangeA.upperBound..<rangeB.lowerBound])
+                // The author is a structural link, so it is read from the node rather than from a
+                // fixed whitespace sequence in the flattened header. The trailing header text is
+                // only a fallback for headers that carry no uploader link.
+                var author = c3Link.xpath("//a")
+                    .first(where: { $0["href"]?.contains("/uploader/") == true })?
+                    .text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if author.isEmpty {
+                    author = String(c3Text[rangeB.upperBound...])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                // Timestamp whitespace varies (regular spaces, non-breaking spaces, line breaks),
+                // so every run of whitespace is normalized to a single space before formatting.
+                let commentTime = c3Text[rangeA.upperBound..<rangeB.lowerBound]
+                    .split(whereSeparator: \.isWhitespace)
+                    .joined(separator: " ")
 
                 var votedUp = false
                 var votedDown = false
@@ -1418,25 +1470,26 @@ extension Parser {
               let currentStr = link.at_xpath("//td [@class='ptds']")?.text
         else {
             if let link = doc.at_xpath("//div [@class='searchnav']") {
-                var timestamp: String?
+                var nextCursor: String?
                 var isEnabled = false
 
                 for aLink in link.xpath("//a") where aLink.text?.contains("Next") == true {
-                    timestamp = aLink["href"]
+                    // Retain the cursor verbatim. Splitting it away used to leave callers
+                    // rebuilding `next=` from the last rendered row, which is unavailable on an
+                    // empty page and stale after the list was replaced.
+                    nextCursor = aLink["href"]
                         .map(URLComponents.init)??
                         .queryItems?
                         .first(where: { $0.name == "next" })?
-                        .value?
-                        .split(separator: "-")
-                        .last
-                        .map(String.init)
+                        .value
 
                     isEnabled = true
                     break
                 }
 
                 return PageNumber(
-                    lastItemTimestamp: timestamp,
+                    nextPageCursor: nextCursor,
+                    lastItemTimestamp: nextCursor?.split(separator: "-").last.map(String.init),
                     isNextButtonEnabled: isEnabled,
                     dateSeekNavigation: parseDateSeekNavigation(doc: doc)
                 )
@@ -1458,9 +1511,12 @@ extension Parser {
                 maximum = num - 1
             }
         }
+        // A `ptt` page table is numerically paged: it carries no "Next" cursor link, so
+        // `isNextButtonEnabled` stays false and `hasNextPage()` must consult `current`/`maximum`.
         return PageNumber(
             current: current,
             maximum: maximum,
+            isNumericPaginated: true,
             dateSeekNavigation: parseDateSeekNavigation(doc: doc)
         )
     }
@@ -1668,187 +1724,78 @@ extension Parser {
     }
 
     // MARK: CommentContent
+    // Comment bodies are parsed without mutating the document. The previous implementation unlinked
+    // and freed every descendant wrapper it had snapshotted, which both discarded the wrapped
+    // content and could free an already freed libxml node when the wrappers were nested.
     static func parseCommentContent(node: XMLElement) -> [CommentContent] {
         var contents = [CommentContent]()
+        var pendingText = ""
 
-        for div in node.xpath("//div") {
-            node.removeChild(div)
+        func flushPendingText() {
+            let text = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
+            pendingText = ""
+            guard !text.isEmpty else { return }
+            contents.append(.init(type: .plainText, text: text))
         }
-        for span in node.xpath("span") {
-            node.removeChild(span)
-        }
-
-        guard var rawContent = node.innerHTML?
-                .replacingOccurrences(of: "<br>", with: "\n")
-                .replacingOccurrences(of: "</span>", with: "")
-        else { return [] }
-
-        while (node.xpath("//a").count
-                + node.xpath("//img").count) > 0
-        {
-            var tmpLink: XMLElement?
-
-            let links = [
-                node.at_xpath("//a"),
-                node.at_xpath("//img")
-            ]
-            .compactMap({ $0 })
-
-            links.forEach { newLink in
-                if tmpLink == nil {
-                    tmpLink = newLink
-                } else {
-                    if let tmpHTML = tmpLink?.toHTML,
-                       let newHTML = newLink.toHTML,
-                       let tmpBound = rawContent.range(of: tmpHTML)?.lowerBound,
-                       let newBound = rawContent.range(of: newHTML)?.lowerBound,
-                       newBound < tmpBound
-                    {
-                        tmpLink = newLink
-                    }
-                }
-            }
-
-            guard let link = tmpLink,
-                  let html = link.toHTML?
-                    .replacingOccurrences(of: "<br>", with: "\n")
-                    .replacingOccurrences(of: "</span>", with: ""),
-                  let range = rawContent.range(of: html)
-            else { continue }
-
-            let text = String(rawContent[..<range.lowerBound])
-            if !text.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ).isEmpty {
-                contents.append(
-                    CommentContent(
-                        type: .plainText,
-                        text: text
-                            .trimmingCharacters(
-                                in: .whitespacesAndNewlines
-                            )
-                    )
-                )
-            }
-
-            if let href = link["href"], let url = URL(string: href) {
-                if let imgSrc = link.at_xpath("//img")?["src"],
-                   let imgURL = URL(string: imgSrc)
-                {
-                    if let content = contents.last,
-                       content.type == .linkedImg
-                    {
-                        contents = contents.dropLast()
-                        contents.append(
-                            CommentContent(
-                                type: .doubleLinkedImg,
-                                link: content.link,
-                                imgURL: content.imgURL,
-                                secondLink: url,
-                                secondImgURL: imgURL
-                            )
+        func appendImage(link: URL?, imgURL: URL) {
+            if let link = link {
+                if let last = contents.last, last.type == .linkedImg {
+                    contents.removeLast()
+                    contents.append(
+                        .init(
+                            type: .doubleLinkedImg, link: last.link, imgURL: last.imgURL,
+                            secondLink: link, secondImgURL: imgURL
                         )
+                    )
+                } else {
+                    contents.append(.init(type: .linkedImg, link: link, imgURL: imgURL))
+                }
+            } else if let last = contents.last, last.type == .singleImg {
+                contents.removeLast()
+                contents.append(.init(type: .doubleImg, imgURL: last.imgURL, secondImgURL: imgURL))
+            } else {
+                contents.append(.init(type: .singleImg, imgURL: imgURL))
+            }
+        }
+
+        // A single location path keeps libxml's document order, and `not(ancestor::a)` keeps the
+        // text and the image of a link from being visited a second time on their own.
+        let query = ".//node()[not(ancestor::a)][self::text() or self::br or self::a or self::img]"
+        for child in node.xpath(query) {
+            switch child.tagName ?? "" {
+            case "text":
+                pendingText += child.text ?? ""
+            case "br":
+                pendingText += "\n"
+            case "a":
+                guard let href = child["href"], let url = URL(string: href) else {
+                    // An anchor without a usable target still carries readable text.
+                    pendingText += child.text ?? ""
+                    continue
+                }
+                flushPendingText()
+                if let imgSrc = child.at_xpath(".//img")?["src"], let imgURL = URL(string: imgSrc) {
+                    appendImage(link: url, imgURL: imgURL)
+                } else {
+                    let text = child.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if text.isEmpty {
+                        contents.append(.init(type: .singleLink, link: url))
                     } else {
-                        contents.append(
-                            CommentContent(
-                                type: .linkedImg,
-                                link: url,
-                                imgURL: imgURL
-                            )
-                        )
+                        contents.append(.init(type: .linkedText, text: text, link: url))
                     }
-                } else if let text = link.text {
-                    if !text
-                        .trimmingCharacters(
-                            in: .whitespacesAndNewlines
-                        )
-                        .isEmpty
-                    {
-                        contents.append(
-                            CommentContent(
-                                type: .linkedText,
-                                text: text
-                                    .trimmingCharacters(
-                                        in: .whitespacesAndNewlines
-                                    ),
-                                link: url
-                            )
-                        )
-                    }
-                } else {
-                    contents.append(
-                        CommentContent(
-                            type: .singleLink,
-                            link: url
-                        )
-                    )
                 }
-            } else if let src = link["src"], let url = URL(string: src) {
-                if let content = contents.last,
-                   content.type == .singleImg
-                {
-                    contents = contents.dropLast()
-                    contents.append(
-                        CommentContent(
-                            type: .doubleImg,
-                            imgURL: content.imgURL,
-                            secondImgURL: url
-                        )
-                    )
-                } else {
-                    contents.append(
-                        CommentContent(
-                            type: .singleImg,
-                            imgURL: url
-                        )
-                    )
-                }
-
-            }
-
-            rawContent.removeSubrange(..<range.upperBound)
-            node.removeChild(link)
-
-            if (node.xpath("//a").count
-                    + node.xpath("//img").count) <= 0
-            {
-                if !rawContent
-                    .trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    )
-                    .isEmpty
-                {
-                    contents.append(
-                        CommentContent(
-                            type: .plainText,
-                            text: rawContent
-                                .trimmingCharacters(
-                                    in: .whitespacesAndNewlines
-                                )
-                        )
-                    )
-                }
+            case "img":
+                guard let src = child["src"], let url = URL(string: src) else { continue }
+                flushPendingText()
+                appendImage(link: nil, imgURL: url)
+            default:
+                // The query only selects text, `br`, `a` and `img` nodes, so anything reaching
+                // this branch is character data under another node name (a CDATA section) and
+                // still contributes its content.
+                pendingText += child.text ?? ""
             }
         }
-
-        if !rawContent.isEmpty && contents.isEmpty {
-            if !rawContent
-                .trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
-                .isEmpty
-            {
-                contents.append(
-                    CommentContent(
-                        type: .plainText,
-                        text: rawContent
-                            .trimmingCharacters(
-                                in: .whitespacesAndNewlines
-                            )
-                    )
-                )
-            }
-        }
+        flushPendingText()
 
         return contents
     }

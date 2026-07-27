@@ -61,15 +61,27 @@ extension DateFormattable {
 struct PageNumber: Equatable {
     var current = 0
     var maximum = 0
+    /// Verbatim value of the server's "Next" link `next=` query item. This is the only
+    /// continuation cursor that survives a page which rendered no rows — reconstructing it
+    /// from the last rendered item is impossible when the page is empty and wrong when the
+    /// list has since been replaced.
+    var nextPageCursor: String?
+    /// Trailing component of `nextPageCursor`. Favorites cursors are `<gid>-<favoritedTime>`.
     var lastItemTimestamp: String?
     var isNextButtonEnabled = false
+    /// True for numerically paged listings (a `p=` page table, e.g. Toplists), which expose no
+    /// "Next" cursor link at all and must be advanced by page index.
+    var isNumericPaginated = false
     var dateSeekNavigation: DateSeekNavigation?
 
     var isSinglePage: Bool {
         current == 0 && maximum == 0
     }
     func hasNextPage(isNumericBased: Bool = false) -> Bool {
-        isNumericBased ? current < maximum : isNextButtonEnabled
+        if isNumericBased || isNumericPaginated {
+            return current < maximum
+        }
+        return isNextButtonEnabled
     }
     mutating func resetPages() {
         self = Self()

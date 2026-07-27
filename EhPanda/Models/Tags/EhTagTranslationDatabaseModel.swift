@@ -31,9 +31,18 @@ struct EhTagTranslationDatabaseResponse: Codable {
 
     let data: [Model]
 
+    // Remote and user-imported databases can repeat a namespace, and the flattened
+    // `namespace + key` composite can collide across namespaces as well. Duplicates are resolved
+    // deterministically by keeping the first occurrence, in the order the namespaces are listed in
+    // the document, instead of trapping the way `Dictionary(uniqueKeysWithValues:)` does.
     var tagTranslations: [String: TagTranslation] {
-        .init(uniqueKeysWithValues: data.flatMap(\.tagTranslations).map({
-            ($0.namespace.rawValue + $0.key, $0)
-        }))
+        var translations = [String: TagTranslation]()
+        for translation in data.flatMap(\.tagTranslations) {
+            let key = translation.namespace.rawValue + translation.key
+            if translations[key] == nil {
+                translations[key] = translation
+            }
+        }
+        return translations
     }
 }
