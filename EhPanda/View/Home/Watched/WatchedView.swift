@@ -90,7 +90,7 @@ struct WatchedView: View {
         .searchable(text: viewStore.$keyword)
         .searchSuggestions {
             TagSuggestionView(
-                keyword: viewStore.$keyword, translations: tagTranslator.translations,
+                keyword: viewStore.$keyword, tagTranslator: tagTranslator,
                 showsImages: setting.showsImagesInTags, isEnabled: setting.showsTagsSearchSuggestion
             )
         }

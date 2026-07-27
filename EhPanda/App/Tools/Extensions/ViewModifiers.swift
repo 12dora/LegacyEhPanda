@@ -84,23 +84,6 @@ struct CornersModifier: ImageModifier {
     }
 }
 
-struct OffsetModifier: ImageModifier {
-    private let size: CGSize?
-    private let offset: CGSize?
-
-    init(size: CGSize?, offset: CGSize?) {
-        self.size = size
-        self.offset = offset
-    }
-
-    func modify(_ image: KFCrossPlatformImage) -> KFCrossPlatformImage {
-        guard let size = size, let offset = offset
-        else { return image }
-
-        return image.cropping(size: size, offset: offset) ?? image
-    }
-}
-
 struct RoundedOffsetModifier: ImageModifier {
     private let size: CGSize?
     private let offset: CGSize?

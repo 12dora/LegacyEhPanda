@@ -210,13 +210,6 @@ private struct PagesRangeSetter: View {
 }
 
 // MARK: Definition
-private struct TupleCategory: Identifiable {
-    var id: String { category.rawValue }
-
-    let isFiltered: Binding<Bool>
-    let category: Category
-}
-
 enum FilterRange: Int, CaseIterable, Identifiable {
     var id: Int { rawValue }
 

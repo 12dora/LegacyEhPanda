@@ -62,29 +62,35 @@ struct HomeView: View {
                             }
                             ToplistsSection(
                                 galleries: viewStore.toplistsGalleries,
-                                isLoading: !viewStore.toplistsLoadingState
-                                    .values.allSatisfy({ $0 != .loading }),
+                                loadingStates: viewStore.toplistsLoadingState,
+                                isLoading: viewStore.toplistsLoadingState.values.contains(.loading),
                                 navigateAction: navigateTo(gid:),
                                 showAllAction: { viewStore.send(.setNavigation(.section(.toplists))) },
-                                reloadAction: { viewStore.send(.fetchAllToplistsGalleries) }
+                                reloadAction: { viewStore.send(.fetchAllToplistsGalleries) },
+                                retryAction: { viewStore.send(.fetchToplistsGalleries($0)) }
                             )
                             MiscGridSection(navigateAction: navigateTo(type:))
                         }
                         .padding(.vertical)
                     }
                 }
-                .opacity(viewStore.popularGalleries.isEmpty ? 0 : 1).zIndex(2)
+                // Sections are independent requests, so the scroll is shown as soon as any of
+                // them has content instead of being gated on Popular alone.
+                .opacity(viewStore.hasAnySectionContent ? 1 : 0).zIndex(2)
                 LoadingView()
                     .opacity(
-                        viewStore.popularLoadingState == .loading
-                        && viewStore.popularGalleries.isEmpty ? 1 : 0
+                        viewStore.isAnySectionLoading
+                        && !viewStore.hasAnySectionContent ? 1 : 0
                     )
                     .zIndex(0)
-                let error = (/LoadingState.failed).extract(from: viewStore.popularLoadingState)
+                let error = viewStore.firstSectionError
                 ErrorView(error: error ?? .unknown) {
                     viewStore.send(.fetchAllGalleries)
                 }
-                .opacity(viewStore.popularGalleries.isEmpty && error != nil ? 1 : 0)
+                .opacity(
+                    !viewStore.hasAnySectionContent
+                    && !viewStore.isAnySectionLoading && error != nil ? 1 : 0
+                )
                 .zIndex(1)
             }
             .sheet(
@@ -101,9 +107,9 @@ struct HomeView: View {
                 }
                 .autoBlur(radius: blurRadius).environment(\.inSheet, true).navigationViewStyle(.stack)
             }
-            .animation(.default, value: viewStore.popularLoadingState)
+            .animation(.default, value: viewStore.isAnySectionLoading)
             .onAppear {
-                if viewStore.popularGalleries.isEmpty {
+                if !viewStore.hasAnySectionContent {
                     viewStore.send(.fetchAllGalleries)
                 }
             }
@@ -120,8 +126,8 @@ struct HomeView: View {
             } label: {
                 Image(systemSymbol: .arrowCounterclockwise)
             }
-            .opacity(viewStore.popularLoadingState == .loading ? 0 : 1)
-            .overlay(ProgressView().opacity(viewStore.popularLoadingState == .loading ? 1 : 0))
+            .opacity(viewStore.isAnySectionLoading ? 0 : 1)
+            .overlay(ProgressView().opacity(viewStore.isAnySectionLoading ? 1 : 0))
         }
     }
 }
@@ -321,43 +327,40 @@ private struct VerticalCoverStack: View {
 // MARK: ToplistsSection
 private struct ToplistsSection: View {
     private let galleries: [Int: [Gallery]]
+    private let loadingStates: [Int: LoadingState]
     private let isLoading: Bool
     private let navigateAction: (String) -> Void
     private let showAllAction: () -> Void
     private let reloadAction: () -> Void
+    private let retryAction: (Int) -> Void
 
     init(
-        galleries: [Int: [Gallery]], isLoading: Bool,
+        galleries: [Int: [Gallery]], loadingStates: [Int: LoadingState], isLoading: Bool,
         navigateAction: @escaping (String) -> Void,
         showAllAction: @escaping () -> Void,
-        reloadAction: @escaping () -> Void
+        reloadAction: @escaping () -> Void,
+        retryAction: @escaping (Int) -> Void
     ) {
         self.galleries = galleries
+        self.loadingStates = loadingStates
         self.isLoading = isLoading
         self.navigateAction = navigateAction
         self.showAllAction = showAllAction
         self.reloadAction = reloadAction
+        self.retryAction = retryAction
     }
 
-    private var dataSource: [Int: [Gallery]] {
-        guard !galleries.isEmpty else {
-            var dictionary = [Int: [Gallery]]()
-            var gallery: Gallery = .empty
-            gallery.title = "......"
-            gallery.uploader = "......"
-            let galleries = Array(repeating: gallery, count: 6)
-
-            ToplistsType.allCases.forEach { type in
-                dictionary[type.categoryIndex] = galleries
-            }
-            return dictionary
-        }
-        return galleries
+    private func categoryGalleries(_ type: ToplistsType) -> [Gallery] {
+        galleries[type.categoryIndex] ?? []
     }
-    private func galleries(type: ToplistsType, range: ClosedRange<Int>) -> [Gallery] {
-        let galleries = dataSource[type.categoryIndex] ?? []
-        guard galleries.count > range.upperBound else { return [] }
-        return Array(galleries[range])
+    private func rankedGalleries(_ type: ToplistsType, range: ClosedRange<Int>) -> [Gallery] {
+        let source = categoryGalleries(type)
+        guard source.count > range.upperBound else { return [] }
+        return Array(source[range])
+    }
+    private func categoryError(_ type: ToplistsType) -> AppError? {
+        guard case .failed(let error)? = loadingStates[type.categoryIndex] else { return nil }
+        return error
     }
 
     var body: some View {
@@ -377,20 +380,94 @@ private struct ToplistsSection: View {
     private func verticalStacks(type: ToplistsType) -> some View {
         VStack(alignment: .leading) {
             Text(type.value).font(.subheadline.bold())
-            HStack {
-                VerticalToplistsStack(
-                    galleries: galleries(type: type, range: 0...2), startRanking: 1,
-                    navigateAction: navigateAction
+            // An empty category renders an inert skeleton instead of fake galleries: a
+            // `Gallery.empty` button would route a random UUID into a blank Detail.
+            if categoryGalleries(type).isEmpty {
+                ToplistsPlaceholderStack(
+                    error: categoryError(type),
+                    retryAction: { retryAction(type.categoryIndex) }
                 )
-                if DeviceUtil.isPad {
+            } else {
+                HStack {
                     VerticalToplistsStack(
-                        galleries: galleries(type: type, range: 3...5), startRanking: 4,
+                        galleries: rankedGalleries(type, range: 0...2), startRanking: 1,
                         navigateAction: navigateAction
                     )
+                    if DeviceUtil.isPad {
+                        VerticalToplistsStack(
+                            galleries: rankedGalleries(type, range: 3...5), startRanking: 4,
+                            navigateAction: navigateAction
+                        )
+                    }
                 }
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 5)
+    }
+}
+
+private struct ToplistsPlaceholderStack: View {
+    private let error: AppError?
+    private let retryAction: () -> Void
+
+    init(error: AppError?, retryAction: @escaping () -> Void) {
+        self.error = error
+        self.retryAction = retryAction
+    }
+
+    private var columnCount: Int {
+        DeviceUtil.isPad ? 2 : 1
+    }
+
+    private var skeleton: some View {
+        HStack {
+            ForEach(0..<columnCount, id: \.self) { _ in
+                VStack(spacing: 10) {
+                    ForEach(0..<3, id: \.self) { index in
+                        VStack(spacing: 10) {
+                            ToplistsSkeletonRow()
+                            Divider().opacity(index == 2 ? 0 : 1)
+                        }
+                    }
+                }
+                .frame(width: Defaults.FrameSize.rankingCellWidth)
+            }
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            skeleton
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+                .opacity(error == nil ? 1 : 0.25)
+            if let error = error {
+                VStack(spacing: 10) {
+                    Image(systemSymbol: error.symbol).font(.title2).foregroundStyle(.gray)
+                    Button(L10n.Localizable.ErrorView.Button.retry, action: retryAction)
+                        .buttonStyle(.bordered).buttonBorderShape(.capsule)
+                }
+            }
+        }
+    }
+}
+
+private struct ToplistsSkeletonRow: View {
+    private var fill: Color {
+        Color(.systemGray5)
+    }
+
+    var body: some View {
+        HStack {
+            RoundedRectangle(cornerRadius: 2).fill(fill)
+                .frame(width: Defaults.ImageSize.rowW * 0.75, height: Defaults.ImageSize.rowH * 0.75)
+            VStack(alignment: .leading, spacing: 8) {
+                RoundedRectangle(cornerRadius: 2).fill(fill).frame(height: 10)
+                RoundedRectangle(cornerRadius: 2).fill(fill).frame(height: 10).padding(.trailing, 40)
+            }
+            .padding(.leading, 10)
+            Spacer()
+        }
     }
 }
 

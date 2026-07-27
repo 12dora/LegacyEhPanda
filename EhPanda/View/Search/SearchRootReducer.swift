@@ -117,7 +117,7 @@ struct SearchRootReducer: Reducer {
 
             case .clearSubStates:
                 state.searchState = .init()
-                state.detailState = .init()
+                state.detailState = .init(replacing: state.detailState)
                 state.filtersState = .init()
                 state.quickSearchState = .init()
                 return .merge(
@@ -128,7 +128,10 @@ struct SearchRootReducer: Reducer {
 
             case .syncHistoryKeywords:
                 return .run { [state] _ in
-                    await databaseClient.updateHistoryKeywords(state.historyKeywords)
+                    let result = await databaseClient.updateHistoryKeywords(state.historyKeywords)
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to persist search history keywords.", context: ["error": "\(error)"])
+                    }
                 }
 
             case .fetchDatabaseInfos:

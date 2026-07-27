@@ -6,7 +6,7 @@
 //
 
 import SwiftUI
-import WaterfallGrid
+import SFSafeSymbols
 import ComposableArchitecture
 
 struct GenericList: View {
@@ -96,7 +96,7 @@ private struct DetailList: View {
     }
 
     private func shouldShowFooter(gallery: Gallery) -> Bool {
-        guard let pageNumber = pageNumber else { return false }
+        guard let pageNumber = pageNumber, fetchMoreAction != nil else { return false }
 
         let isLastGallery = gallery == galleries.last
         let isPageNumberValid = pageNumber.hasNextPage()
@@ -135,20 +135,18 @@ private struct WaterfallList: View {
     private let navigateAction: ((String) -> Void)?
     private let translateAction: ((String) -> (String, TagTranslation?))?
 
-    private var columnsInPortrait: Int {
-        DeviceUtil.isPadWidth ? 4 : 2
+    /// Derived from the live container width so that rotation and iPad split view reflow the
+    /// masonry, which the previous `WaterfallGrid` handled internally.
+    private func columnCount(width: CGFloat) -> Int {
+        guard DeviceUtil.isPadWidth else { return 2 }
+        return width >= DeviceUtil.windowH ? 5 : 4
     }
-    private var columnsInLandscape: Int {
-        DeviceUtil.isPadWidth ? 5 : 2
-    }
 
-    private var shouldShowFooter: Bool {
-        guard let pageNumber = pageNumber else { return false }
-
-        let isPageNumberValid = pageNumber.hasNextPage()
-        let isLoadingStateIdle = footerLoadingState == .idle
-
-        return !isLoadingStateIdle && isPageNumberValid
+    /// A pagination control is only meaningful when the caller can actually load more and
+    /// the server reported a next page. Otherwise nothing is rendered, so no dead, VoiceOver
+    /// actionable chevron is exposed.
+    private var canFetchMore: Bool {
+        fetchMoreAction != nil && pageNumber?.hasNextPage() == true
     }
 
     init(
@@ -167,25 +165,34 @@ private struct WaterfallList: View {
         self.translateAction = translateAction
     }
 
-    var body: some View {
-        List {
-            WaterfallGrid(galleries) { gallery in
-                Button {
-                    navigateAction?(gallery.id)
-                } label: {
-                    GalleryThumbnailCell(gallery: gallery, setting: setting, translateAction: translateAction)
-                        .tint(.primary).multilineTextAlignment(.leading)
-                }
-                .buttonStyle(.borderless)
+    /// Round-robin column assignment keeps the masonry lazy: each column is its own
+    /// `LazyVStack`, so paginated cells and their images are only realized while visible
+    /// instead of being retained for the whole session inside a single `List` row.
+    private func columnGalleries(_ column: Int, columnCount: Int) -> [Gallery] {
+        stride(from: column, to: galleries.count, by: columnCount).map { galleries[$0] }
+    }
+
+    @ViewBuilder private func cell(gallery: Gallery) -> some View {
+        Button {
+            navigateAction?(gallery.id)
+        } label: {
+            GalleryThumbnailCell(gallery: gallery, setting: setting, translateAction: translateAction)
+                .tint(.primary).multilineTextAlignment(.leading)
+        }
+        .buttonStyle(.borderless)
+        .onAppear {
+            // In-content pagination sentinel.
+            if gallery == galleries.last {
+                fetchMoreAction?()
             }
-            .gridStyle(
-                columnsInPortrait: columnsInPortrait, columnsInLandscape: columnsInLandscape,
-                spacing: 15, animation: nil
-            )
-            if !shouldShowFooter {
-                Button {
-                    fetchMoreAction?()
-                } label: {
+        }
+    }
+
+    @ViewBuilder private var paginationFooter: some View {
+        if canFetchMore, let fetchMoreAction = fetchMoreAction {
+            switch footerLoadingState {
+            case .idle:
+                Button(action: fetchMoreAction) {
                     HStack {
                         Spacer()
                         Image(systemSymbol: .chevronDown)
@@ -193,13 +200,32 @@ private struct WaterfallList: View {
                     }
                 }
                 .foregroundStyle(.tint)
-            } else {
-                FetchMoreFooter(
-                    loadingState: footerLoadingState,
-                    retryAction: fetchMoreAction
-                )
+                .frame(height: 50)
+            default:
+                FetchMoreFooter(loadingState: footerLoadingState, retryAction: fetchMoreAction)
             }
         }
-        .listStyle(.plain)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let columns = columnCount(width: proxy.size.width)
+            ScrollView {
+                VStack(spacing: 15) {
+                    HStack(alignment: .top, spacing: 15) {
+                        ForEach(0..<columns, id: \.self) { column in
+                            LazyVStack(spacing: 15) {
+                                ForEach(columnGalleries(column, columnCount: columns)) { gallery in
+                                    cell(gallery: gallery)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .top)
+                        }
+                    }
+                    paginationFooter
+                }
+                .padding(15)
+            }
+        }
     }
 }

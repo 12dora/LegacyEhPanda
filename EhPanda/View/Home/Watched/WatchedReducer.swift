@@ -19,6 +19,10 @@ struct WatchedReducer: Reducer {
         case fetchGalleries, fetchMoreGalleries, fetchDateSeekGalleries
     }
 
+    /// Backstop for a run of empty-but-continuable pages, bounding the work even while the
+    /// server keeps advancing its cursor.
+    private static let maxEmptyPageContinuations = 10
+
     struct State: Equatable {
         @BindingState var route: Route?
         @BindingState var keyword = ""
@@ -29,6 +33,14 @@ struct WatchedReducer: Reducer {
         var pageNumber = PageNumber()
         var loadingState: LoadingState = .idle
         var footerLoadingState: LoadingState = .idle
+
+        /// Identifies the current base request (initial fetch or date seek). Footer completions
+        /// carrying an older generation are rejected so stale pages never append to a newer list.
+        var requestGeneration = 0
+        /// Continuation cursor, held separately from the rendered list so that an empty page
+        /// cannot reuse a previous request's last item.
+        var lastGalleryID: String?
+        var emptyPageContinuations = 0
 
         var filtersState = FiltersReducer.State()
         var quickSearchState = QuickSearchReducer.State()
@@ -55,12 +67,12 @@ struct WatchedReducer: Reducer {
 
         case teardown
         case fetchGalleries(String? = nil)
-        case fetchGalleriesDone(Result<(PageNumber, [Gallery]), AppError>)
+        case fetchGalleriesDone(Int, Result<(PageNumber, [Gallery]), AppError>)
         case fetchMoreGalleries
-        case fetchMoreGalleriesDone(Result<(PageNumber, [Gallery]), AppError>)
+        case fetchMoreGalleriesDone(Int, Result<(PageNumber, [Gallery]), AppError>)
         case presentDateSeek
         case performDateSeek(DateSeekDirection)
-        case performDateSeekDone(Result<(PageNumber, [Gallery]), AppError>)
+        case performDateSeekDone(Int, Result<(PageNumber, [Gallery]), AppError>)
 
         case filters(FiltersReducer.Action)
         case detail(DetailReducer.Action)
@@ -86,7 +98,7 @@ struct WatchedReducer: Reducer {
                 return route == nil ? .send(.clearSubStates) : .none
 
             case .clearSubStates:
-                state.detailState = .init()
+                state.detailState = .init(replacing: state.detailState)
                 state.filtersState = .init()
                 state.quickSearchState = .init()
                 return .merge(
@@ -101,31 +113,52 @@ struct WatchedReducer: Reducer {
                 return .merge(CancelID.allCases.map(Effect.cancel(id:)))
 
             case .fetchGalleries(let keyword):
-                guard state.loadingState != .loading else { return .none }
                 if let keyword = keyword {
                     state.keyword = keyword
                 }
+                // Latest-wins: a new base request replaces the in-flight base/date-seek request
+                // and any footer continuation instead of racing them.
+                state.requestGeneration += 1
+                state.lastGalleryID = nil
+                state.emptyPageContinuations = 0
                 state.loadingState = .loading
+                state.footerLoadingState = .idle
                 state.pageNumber.resetPages()
+                let generation = state.requestGeneration
                 let filter = databaseClient.fetchFilterSynchronously(range: .watched)
-                return .run { [keyword = state.keyword] send in
-                    let response = await WatchedGalleriesRequest(filter: filter, keyword: keyword).response()
-                    await send(.fetchGalleriesDone(response))
-                }
-                .cancellable(id: CancelID.fetchGalleries)
+                return .merge(
+                    .cancel(id: CancelID.fetchMoreGalleries),
+                    .cancel(id: CancelID.fetchDateSeekGalleries),
+                    .run { [keyword = state.keyword] send in
+                        let response = await WatchedGalleriesRequest(filter: filter, keyword: keyword).response()
+                        await send(.fetchGalleriesDone(generation, response))
+                    }
+                    .cancellable(id: CancelID.fetchGalleries, cancelInFlight: true)
+                )
 
-            case .fetchGalleriesDone(let result):
+            case .fetchGalleriesDone(let generation, let result):
+                guard generation == state.requestGeneration else { return .none }
                 state.loadingState = .idle
                 switch result {
                 case .success(let (pageNumber, galleries)):
+                    // Retain the returned pagination before any continuation is dispatched.
+                    state.pageNumber = pageNumber
                     guard !galleries.isEmpty else {
                         state.loadingState = .failed(.notFound)
-                        guard pageNumber.hasNextPage() else { return .none }
+                        // An empty page carries no row to continue from; only the server's own
+                        // cursor can advance past it.
+                        guard pageNumber.hasNextPage(), pageNumber.nextPageCursor != nil
+                        else { return .none }
                         return .send(.fetchMoreGalleries)
                     }
-                    state.pageNumber = pageNumber
                     state.galleries = galleries
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    state.lastGalleryID = galleries.last?.id
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache watched galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.loadingState = .failed(error)
                 }
@@ -133,34 +166,52 @@ struct WatchedReducer: Reducer {
 
             case .fetchMoreGalleries:
                 let pageNumber = state.pageNumber
+                let cursor = pageNumber.nextPageCursor
                 guard pageNumber.hasNextPage(),
                       state.footerLoadingState != .loading,
-                      let lastID = state.galleries.last?.id
+                      let lastID = cursor ?? state.lastGalleryID
                 else { return .none }
                 state.footerLoadingState = .loading
+                let generation = state.requestGeneration
                 let filter = databaseClient.fetchFilterSynchronously(range: .watched)
                 return .run { [keyword = state.keyword] send in
                     let response = await MoreWatchedGalleriesRequest(
-                        filter: filter, lastID: lastID, keyword: keyword
+                        filter: filter, lastID: lastID, keyword: keyword, nextCursor: cursor
                     )
                     .response()
-                    await send(.fetchMoreGalleriesDone(response))
+                    await send(.fetchMoreGalleriesDone(generation, response))
                 }
-                .cancellable(id: CancelID.fetchMoreGalleries)
+                .cancellable(id: CancelID.fetchMoreGalleries, cancelInFlight: true)
 
-            case .fetchMoreGalleriesDone(let result):
+            case .fetchMoreGalleriesDone(let generation, let result):
+                guard generation == state.requestGeneration else { return .none }
                 state.footerLoadingState = .idle
                 switch result {
                 case .success(let (pageNumber, galleries)):
+                    let previousCursor = state.pageNumber.nextPageCursor
                     state.pageNumber = pageNumber
                     state.insertGalleries(galleries)
 
                     var effects: [Effect<Action>] = [
-                        .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                        .run { _ in
+                            let result = await databaseClient.cacheGalleries(galleries)
+                            if case .failure(let error) = result {
+                                Logger.error("Failed to cache watched galleries.", context: ["error": "\(error)"])
+                            }
+                        }
                     ]
-                    if galleries.isEmpty, pageNumber.hasNextPage() {
-                        effects.append(.send(.fetchMoreGalleries))
-                    } else if !galleries.isEmpty {
+                    if galleries.isEmpty {
+                        state.emptyPageContinuations += 1
+                        // Continue only while the server keeps handing back a *new* cursor: an
+                        // unchanged cursor would replay the same empty page forever.
+                        if pageNumber.hasNextPage(),
+                           let cursor = pageNumber.nextPageCursor, cursor != previousCursor,
+                           state.emptyPageContinuations <= Self.maxEmptyPageContinuations {
+                            effects.append(.send(.fetchMoreGalleries))
+                        }
+                    } else {
+                        state.emptyPageContinuations = 0
+                        state.lastGalleryID = galleries.last?.id
                         state.loadingState = .idle
                     }
                     return .merge(effects)
@@ -177,33 +228,51 @@ struct WatchedReducer: Reducer {
                 return .run(operation: { _ in hapticsClient.generateFeedback(.light) })
 
             case .performDateSeek(let direction):
-                guard state.loadingState != .loading,
-                      let url = state.pageNumber.dateSeekNavigation?
-                        .seekURL(date: state.dateSeekDate, direction: direction)
+                guard let url = state.pageNumber.dateSeekNavigation?
+                    .seekURL(date: state.dateSeekDate, direction: direction)
                 else { return .none }
                 state.dateSeekPresented = false
+                state.requestGeneration += 1
+                state.lastGalleryID = nil
+                state.emptyPageContinuations = 0
                 state.loadingState = .loading
                 state.footerLoadingState = .idle
                 state.pageNumber.resetPages()
-                return .run { send in
-                    await send(.performDateSeekDone(await DateSeekGalleriesRequest(url: url).response()))
-                }
-                .cancellable(id: CancelID.fetchDateSeekGalleries)
+                let generation = state.requestGeneration
+                return .merge(
+                    .cancel(id: CancelID.fetchGalleries),
+                    .cancel(id: CancelID.fetchMoreGalleries),
+                    .run { send in
+                        await send(
+                            .performDateSeekDone(
+                                generation, await DateSeekGalleriesRequest(url: url).response()
+                            )
+                        )
+                    }
+                    .cancellable(id: CancelID.fetchDateSeekGalleries, cancelInFlight: true)
+                )
 
-            case .performDateSeekDone(let result):
+            case .performDateSeekDone(let generation, let result):
+                guard generation == state.requestGeneration else { return .none }
                 state.loadingState = .idle
                 switch result {
                 case .success(let (pageNumber, galleries)):
+                    state.pageNumber = pageNumber
                     guard !galleries.isEmpty else {
                         state.loadingState = .failed(.notFound)
                         return .none
                     }
-                    state.pageNumber = pageNumber
                     state.galleries = galleries
+                    state.lastGalleryID = galleries.last?.id
                     if let navigation = pageNumber.dateSeekNavigation {
                         state.dateSeekDate = navigation.clampedDate(state.dateSeekDate)
                     }
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache watched date galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.loadingState = .failed(error)
                     return .none

@@ -194,6 +194,9 @@ extension QuickSearchView {
                 Button(action: confirmAction) {
                     Text(L10n.Localizable.QuickSearchView.ToolbarItem.Button.confirm).bold()
                 }
+                // A blank record cannot be confirmed: it would persist as an actionable row
+                // that performs an empty search.
+                .disabled(!word.isValid)
             }
         }
     }

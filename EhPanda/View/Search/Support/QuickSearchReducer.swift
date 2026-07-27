@@ -83,7 +83,10 @@ struct QuickSearchReducer: Reducer {
 
             case .syncQuickSearchWords:
                 return .run { [state] _ in
-                    await databaseClient.updateQuickSearchWords(state.quickSearchWords)
+                    let result = await databaseClient.updateQuickSearchWords(state.quickSearchWords)
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to persist quick search words.", context: ["error": "\(error)"])
+                    }
                 }
 
             case .toggleListEditing:
@@ -95,15 +98,21 @@ struct QuickSearchReducer: Reducer {
                 return .none
 
             case .appendWord:
-                state.quickSearchWords.append(state.editingWord)
+                // A blank record would persist as an actionable row that performs an empty search.
+                let appendedWord = state.editingWord.trimmed
+                guard appendedWord.isValid else { return .none }
+                state.editingWord = appendedWord
+                state.quickSearchWords.append(appendedWord)
                 return .send(.syncQuickSearchWords)
 
             case .editWord:
-                if let index = state.quickSearchWords.firstIndex(where: { $0.id == state.editingWord.id }) {
-                    state.quickSearchWords[index] = state.editingWord
-                    return .send(.syncQuickSearchWords)
-                }
-                return .none
+                let editedWord = state.editingWord.trimmed
+                guard editedWord.isValid,
+                      let index = state.quickSearchWords.firstIndex(where: { $0.id == editedWord.id })
+                else { return .none }
+                state.editingWord = editedWord
+                state.quickSearchWords[index] = editedWord
+                return .send(.syncQuickSearchWords)
 
             case .deleteWord(let word):
                 state.quickSearchWords = state.quickSearchWords.filter({ $0 != word })
@@ -130,9 +139,25 @@ struct QuickSearchReducer: Reducer {
 
             case .fetchQuickSearchWordsDone(let words):
                 state.loadingState = .idle
-                state.quickSearchWords = words
-                return .none
+                // Clean invalid legacy records that were persisted before validation existed.
+                let validWords = words.map(\.trimmed).filter(\.isValid)
+                state.quickSearchWords = validWords
+                return validWords.count == words.count ? .none : .send(.syncQuickSearchWords)
             }
         }
+    }
+}
+
+extension QuickSearchWord {
+    var trimmed: Self {
+        .init(
+            id: id,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            content: content.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+    /// A quick-search record is only meaningful when it carries a searchable content string.
+    var isValid: Bool {
+        !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

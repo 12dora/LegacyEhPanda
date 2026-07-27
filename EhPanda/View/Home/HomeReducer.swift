@@ -17,6 +17,10 @@ struct HomeReducer: Reducer {
         case section(HomeSectionType)
     }
 
+    private enum CancelID {
+        case cardHitTestingUnlock
+    }
+
     struct State: Equatable {
         @BindingState var route: Route?
         @BindingState var cardPageIndex = 1
@@ -33,6 +37,25 @@ struct HomeReducer: Reducer {
         var frontpageLoadingState: LoadingState = .idle
         var toplistsGalleries = [Int: [Gallery]]()
         var toplistsLoadingState = [Int: LoadingState]()
+
+        /// Home sections are independent requests: one failing endpoint must not blank out
+        /// the sections that did succeed.
+        var hasAnySectionContent: Bool {
+            !popularGalleries.isEmpty || !frontpageGalleries.isEmpty
+            || toplistsGalleries.values.contains(where: { !$0.isEmpty })
+        }
+        var isAnySectionLoading: Bool {
+            popularLoadingState == .loading || frontpageLoadingState == .loading
+            || toplistsLoadingState.values.contains(.loading)
+        }
+        var firstSectionError: AppError? {
+            if case .failed(let error) = popularLoadingState { return error }
+            if case .failed(let error) = frontpageLoadingState { return error }
+            for type in ToplistsType.allCases {
+                if case .failed(let error)? = toplistsLoadingState[type.categoryIndex] { return error }
+            }
+            return nil
+        }
 
         var frontpageState = FrontpageReducer.State()
         var toplistsState = ToplistsReducer.State()
@@ -56,7 +79,19 @@ struct HomeReducer: Reducer {
             }
             trimmedGalleries.shuffle()
             popularGalleries = trimmedGalleries
-            currentCardID = trimmedGalleries[cardPageIndex].gid
+            normalizeCardPageIndex()
+        }
+
+        /// `cardPageIndex` starts at 1 and survives refreshes, so a shorter (or single-item)
+        /// result would otherwise be subscripted out of range. Clamp first, then derive the card.
+        mutating func normalizeCardPageIndex() {
+            guard !popularGalleries.isEmpty else {
+                cardPageIndex = 0
+                currentCardID = ""
+                return
+            }
+            cardPageIndex = min(max(cardPageIndex, 0), popularGalleries.count - 1)
+            currentCardID = popularGalleries[cardPageIndex].gid
         }
 
         mutating func setFrontpageGalleries(_ galleries: [Gallery]) {
@@ -102,13 +137,19 @@ struct HomeReducer: Reducer {
                 return state.route == nil ? .send(.clearSubStates) : .none
 
             case .binding(\.$cardPageIndex):
-                guard state.cardPageIndex < state.popularGalleries.count else { return .none }
+                guard state.popularGalleries.indices.contains(state.cardPageIndex) else {
+                    state.normalizeCardPageIndex()
+                    return .none
+                }
                 state.currentCardID = state.popularGalleries[state.cardPageIndex].gid
                 state.allowsCardHitTesting = false
+                // A newer swipe must own the unlock: otherwise an older 300ms timer re-enables
+                // hit testing while the current transition is still running.
                 return .run { send in
                     try await Task.sleep(for: .milliseconds(300))
                     await send(.setAllowsCardHitTesting(true))
                 }
+                .cancellable(id: CancelID.cardHitTestingUnlock, cancelInFlight: true)
 
             case .binding:
                 return .none
@@ -123,12 +164,13 @@ struct HomeReducer: Reducer {
                 state.popularState = .init()
                 state.watchedState = .init()
                 state.historyState = .init()
-                state.detailState = .init()
+                state.detailState = .init(replacing: state.detailState)
                 return .merge(
                     .send(.frontpage(.teardown)),
                     .send(.toplists(.teardown)),
                     .send(.popular(.teardown)),
                     .send(.watched(.teardown)),
+                    .send(.history(.teardown)),
                     .send(.detail(.teardown))
                 )
 
@@ -169,7 +211,12 @@ struct HomeReducer: Reducer {
                         return .none
                     }
                     state.setPopularGalleries(galleries)
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache home popular galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.popularLoadingState = .failed(error)
                 }
@@ -193,7 +240,12 @@ struct HomeReducer: Reducer {
                         return .none
                     }
                     state.setFrontpageGalleries(galleries)
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache home frontpage galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.frontpageLoadingState = .failed(error)
                 }
@@ -216,7 +268,12 @@ struct HomeReducer: Reducer {
                         return .none
                     }
                     state.toplistsGalleries[index] = galleries
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache home toplists galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.toplistsLoadingState[index] = .failed(error)
                 }

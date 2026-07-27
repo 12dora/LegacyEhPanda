@@ -85,7 +85,14 @@ struct FiltersReducer: Reducer {
                 case .watched:
                     filter = state.watchedFilter
                 }
-                return .run(operation: { _ in await databaseClient.updateFilter(filter, range: range) })
+                return .run { _ in
+                    let result = await databaseClient.updateFilter(filter, range: range)
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to persist filter.", context: [
+                            "range": "\(range)", "error": "\(error)"
+                        ])
+                    }
+                }
 
             case .resetFilters:
                 switch state.filterRange {

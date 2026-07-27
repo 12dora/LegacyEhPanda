@@ -12,8 +12,15 @@ struct ToplistsReducer: Reducer {
         case detail(String)
     }
 
-    private enum CancelID: CaseIterable {
-        case fetchGalleries, fetchMoreGalleries
+    /// Cancellation is scoped per category so that switching categories cannot strand another
+    /// category's loading state.
+    private enum CancelID: Hashable {
+        case fetchGalleries(ToplistsType)
+        case fetchMoreGalleries(ToplistsType)
+
+        static var allCases: [CancelID] {
+            ToplistsType.allCases.flatMap { [CancelID.fetchGalleries($0), .fetchMoreGalleries($0)] }
+        }
     }
 
     struct State: Equatable {
@@ -34,6 +41,9 @@ struct ToplistsReducer: Reducer {
         var rawPageNumber = [ToplistsType: PageNumber]()
         var rawLoadingState = [ToplistsType: LoadingState]()
         var rawFooterLoadingState = [ToplistsType: LoadingState]()
+        /// Identifies the current base request per category. Footer completions carrying an
+        /// older generation are rejected so a replaced page can never append to a newer list.
+        var rawRequestGeneration = [ToplistsType: Int]()
 
         var galleries: [Gallery]? {
             rawGalleries[type]
@@ -75,9 +85,9 @@ struct ToplistsReducer: Reducer {
 
         case teardown
         case fetchGalleries(Int? = nil)
-        case fetchGalleriesDone(ToplistsType, Result<(PageNumber, [Gallery]), AppError>)
+        case fetchGalleriesDone(ToplistsType, Int, Result<(PageNumber, [Gallery]), AppError>)
         case fetchMoreGalleries
-        case fetchMoreGalleriesDone(ToplistsType, Result<(PageNumber, [Gallery]), AppError>)
+        case fetchMoreGalleriesDone(ToplistsType, Int, Result<(PageNumber, [Gallery]), AppError>)
 
         case detail(DetailReducer.Action)
     }
@@ -112,7 +122,7 @@ struct ToplistsReducer: Reducer {
                 return .send(.fetchGalleries())
 
             case .clearSubStates:
-                state.detailState = .init()
+                state.detailState = .init(replacing: state.detailState)
                 return .send(.detail(.teardown))
 
             case .performJumpPage:
@@ -135,23 +145,32 @@ struct ToplistsReducer: Reducer {
                 return .merge(CancelID.allCases.map(Effect.cancel(id:)))
 
             case .fetchGalleries(let pageNum):
-                guard state.loadingState != .loading else { return .none }
-                state.rawLoadingState[state.type] = .loading
-                if state.pageNumber == nil {
-                    state.rawPageNumber[state.type] = PageNumber()
+                let type = state.type
+                // Latest-wins within the category: a jump-page or reload replaces the in-flight
+                // base request and its footer continuation instead of being dropped.
+                let generation = (state.rawRequestGeneration[type] ?? 0) + 1
+                state.rawRequestGeneration[type] = generation
+                state.rawLoadingState[type] = .loading
+                state.rawFooterLoadingState[type] = .idle
+                if state.rawPageNumber[type] == nil {
+                    state.rawPageNumber[type] = PageNumber()
                 } else {
-                    state.rawPageNumber[state.type]?.resetPages()
+                    state.rawPageNumber[type]?.resetPages()
                 }
-                return .run { [type = state.type] send in
-                    let response = await ToplistsGalleriesRequest(
-                        catIndex: type.categoryIndex, pageNum: pageNum
-                    )
-                    .response()
-                    await send(.fetchGalleriesDone(type, response))
-                }
-                .cancellable(id: CancelID.fetchGalleries)
+                return .merge(
+                    .cancel(id: CancelID.fetchMoreGalleries(type)),
+                    .run { send in
+                        let response = await ToplistsGalleriesRequest(
+                            catIndex: type.categoryIndex, pageNum: pageNum
+                        )
+                        .response()
+                        await send(.fetchGalleriesDone(type, generation, response))
+                    }
+                    .cancellable(id: CancelID.fetchGalleries(type), cancelInFlight: true)
+                )
 
-            case .fetchGalleriesDone(let type, let result):
+            case .fetchGalleriesDone(let type, let generation, let result):
+                guard generation == state.rawRequestGeneration[type] ?? 0 else { return .none }
                 state.rawLoadingState[type] = .idle
                 switch result {
                 case .success(let (pageNumber, galleries)):
@@ -163,29 +182,37 @@ struct ToplistsReducer: Reducer {
                         return .send(.fetchMoreGalleries)
                     }
                     state.rawGalleries[type] = galleries
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache toplists galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.rawLoadingState[type] = .failed(error)
                 }
                 return .none
 
             case .fetchMoreGalleries:
+                let type = state.type
                 let pageNumber = state.pageNumber ?? .init()
                 guard pageNumber.hasNextPage(),
                       state.footerLoadingState != .loading
                 else { return .none }
-                state.rawFooterLoadingState[state.type] = .loading
+                state.rawFooterLoadingState[type] = .loading
+                let generation = state.rawRequestGeneration[type] ?? 0
                 let pageNum = pageNumber.current + 1
-                return .run { [type = state.type] send in
+                return .run { send in
                     let response = await MoreToplistsGalleriesRequest(
                         catIndex: type.categoryIndex, pageNum: pageNum
                     )
                     .response()
-                    await send(.fetchMoreGalleriesDone(type, response))
+                    await send(.fetchMoreGalleriesDone(type, generation, response))
                 }
-                .cancellable(id: CancelID.fetchMoreGalleries)
+                .cancellable(id: CancelID.fetchMoreGalleries(type), cancelInFlight: true)
 
-            case .fetchMoreGalleriesDone(let type, let result):
+            case .fetchMoreGalleriesDone(let type, let generation, let result):
+                guard generation == state.rawRequestGeneration[type] ?? 0 else { return .none }
                 state.rawFooterLoadingState[type] = .idle
                 switch result {
                 case .success(let (pageNumber, galleries)):
@@ -193,7 +220,12 @@ struct ToplistsReducer: Reducer {
                     state.insertGalleries(type: type, galleries: galleries)
 
                     var effects: [Effect<Action>] = [
-                        .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                        .run { _ in
+                            let result = await databaseClient.cacheGalleries(galleries)
+                            if case .failure(let error) = result {
+                                Logger.error("Failed to cache toplists galleries.", context: ["error": "\(error)"])
+                            }
+                        }
                     ]
                     if galleries.isEmpty, pageNumber.hasNextPage(), type == state.type {
                         effects.append(.send(.fetchMoreGalleries))

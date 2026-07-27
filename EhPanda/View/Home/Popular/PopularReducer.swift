@@ -68,7 +68,7 @@ struct PopularReducer: Reducer {
                 return route == nil ? .send(.clearSubStates) : .none
 
             case .clearSubStates:
-                state.detailState = .init()
+                state.detailState = .init(replacing: state.detailState)
                 state.filtersState = .init()
                 return .send(.detail(.teardown))
 
@@ -94,7 +94,12 @@ struct PopularReducer: Reducer {
                         return .none
                     }
                     state.galleries = galleries
-                    return .run(operation: { _ in await databaseClient.cacheGalleries(galleries) })
+                    return .run { _ in
+                        let result = await databaseClient.cacheGalleries(galleries)
+                        if case .failure(let error) = result {
+                            Logger.error("Failed to cache popular galleries.", context: ["error": "\(error)"])
+                        }
+                    }
                 case .failure(let error):
                     state.loadingState = .failed(error)
                 }

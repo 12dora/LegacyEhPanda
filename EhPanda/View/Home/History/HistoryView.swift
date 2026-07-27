@@ -30,12 +30,13 @@ struct HistoryView: View {
 
     var body: some View {
         GenericList(
-            galleries: viewStore.filteredGalleries,
+            galleries: viewStore.galleries,
             setting: setting,
             pageNumber: nil,
             loadingState: viewStore.loadingState,
-            footerLoadingState: .idle,
+            footerLoadingState: viewStore.footerLoadingState,
             fetchAction: { viewStore.send(.fetchGalleries) },
+            fetchMoreAction: { viewStore.send(.fetchMoreGalleries) },
             navigateAction: { viewStore.send(.setNavigation(.detail($0))) },
             translateAction: {
                 tagTranslator.lookup(word: $0, returnOriginal: !setting.translatesTags)
@@ -86,7 +87,7 @@ struct HistoryView: View {
             } label: {
                 Image(systemSymbol: .trashCircle)
             }
-            .disabled(viewStore.loadingState != .idle || viewStore.galleries.isEmpty)
+            .disabled(viewStore.loadingState == .loading)
             .confirmationDialog(
                 message: L10n.Localizable.ConfirmationDialog.Title.clear,
                 unwrapping: viewStore.$route,
