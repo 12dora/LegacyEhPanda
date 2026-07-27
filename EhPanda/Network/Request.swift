@@ -88,6 +88,8 @@ private final class PublisherAsyncState<Output> {
 }
 
 private extension Publisher {
+    /// Only safe, idempotent reads use this: replaying them can at worst waste bandwidth.
+    /// Mutations are never retried automatically, see the note above `// MARK: Account Ops`.
     func genericRetry() -> Publishers.Retry<Self> {
         retry(3)
     }
@@ -123,13 +125,224 @@ private extension URLRequest {
         setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
     }
 }
+/// `DataTaskPublisher` reports every completed exchange as a success, including 4xx and 5xx
+/// answers, so every request has to reject non-2xx statuses itself. Error pages would otherwise
+/// reach the parsers as ordinary content, be saved as torrents or be acknowledged as mutations.
 private func validateHTTPResponse(
     _ output: (data: Data, response: URLResponse)
 ) throws -> (data: Data, response: URLResponse) {
+    guard let response = output.response as? HTTPURLResponse
+    else { throw AppError.networkingFailed }
+
+    switch response.statusCode {
+    case 200..<300:
+        return output
+    case 404, 410:
+        throw AppError.notFound
+    case 429, 500...599:
+        // Rate limiting and server faults are transient: `.networkingFailed` keeps them
+        // retryable so that callers can back off instead of treating them as bad content.
+        throw AppError.networkingFailed
+    default:
+        throw AppError.unknown
+    }
+}
+/// `api.php` answers a refused call with HTTP 200, so the payload decides whether the operation
+/// was applied: a member dictionary without an `error` member is the shape of an applied call.
+private func validateAPIMutationResponse(
+    _ output: (data: Data, response: URLResponse)
+) throws -> (data: Data, response: URLResponse) {
+    let output = try validateHTTPResponse(output)
+
+    // A refusal answers with a page or with `{"error": "..."}` instead, e.g. for a missing or
+    // invalid API key, a uid/key mismatch or a flood check.
+    guard let dictionary = (try? JSONSerialization.jsonObject(with: output.data)) as? [String: Any],
+          !dictionary.isEmpty, dictionary["error"] == nil
+    else { throw AppError.unknown }
+
+    return output
+}
+/// The page a mutation must answer with to count as applied.
+///
+/// The site refuses a mutation with HTTP 200 and a page that simply lacks the form it renders for
+/// an accepted one; the IP ban notice, for instance, is a bare sentence without any markup at all.
+/// Success is therefore recognized by its own shape, because "parses as a document" and "is not
+/// the login page" are properties that every refusal shares with an accepted operation.
+private enum MutationSuccessShape {
+    /// The comment form posts to the gallery page itself (`<form method="post" action="#cnew">`),
+    /// which renders `commenttext_new` for every session that is allowed to comment.
+    case galleryCommentForm
+    /// The favorites popup answers with its own form, or with the script that dismisses it.
+    case favoritesPopup
+    /// `favorites.php` answers with the favorites list and its modification form.
+    case favoritesList
+
+    func isSatisfied(by document: HTMLDocument) -> Bool {
+        switch self {
+        case .galleryCommentForm:
+            return document.at_xpath("//textarea [@name='commenttext_new']") != nil
+        case .favoritesPopup:
+            return document.at_xpath("//input [@name='favcat']") != nil
+                || document.at_xpath("//textarea [@name='favnote']") != nil
+                || document.at_xpath("//script") != nil
+        case .favoritesList:
+            return document.at_xpath("//form [@id='favform']") != nil
+                || document.at_xpath("//div [@class='ido']") != nil
+        }
+    }
+}
+private func validateMutationResponse(
+    _ output: (data: Data, response: URLResponse), expecting shape: MutationSuccessShape
+) throws -> (data: Data, response: URLResponse) {
+    let output = try validateHTTPResponse(output)
+
+    guard !output.data.isEmpty, let document = try? Kanna.HTML(html: output.data, encoding: .utf8)
+    else { throw AppError.parseFailed }
+
+    // Recognize the two refusals that carry a meaning of their own before falling back to the
+    // shape check, so that the caller can tell a ban and a lost session from a plain rejection.
+    if let banInterval = Parser.parseBanInterval(doc: document) {
+        throw AppError.ipBanned(banInterval)
+    }
+    guard document.at_xpath("//input [@name='ipb_login_submit']") == nil,
+          shape.isSatisfied(by: document)
+    else { throw AppError.unknown }
+
+    return output
+}
+private func validateCommentMutationResponse(
+    _ output: (data: Data, response: URLResponse)
+) throws -> (data: Data, response: URLResponse) {
+    try validateMutationResponse(output, expecting: .galleryCommentForm)
+}
+private func validateFavorMutationResponse(
+    _ output: (data: Data, response: URLResponse)
+) throws -> (data: Data, response: URLResponse) {
+    try validateMutationResponse(output, expecting: .favoritesPopup)
+}
+private func validateUnfavorMutationResponse(
+    _ output: (data: Data, response: URLResponse)
+) throws -> (data: Data, response: URLResponse) {
+    try validateMutationResponse(output, expecting: .favoritesList)
+}
+/// The exhentai landing page is fetched only for the credentials in its response headers, which
+/// the site also sets on the authorization page it answers to accounts without access, so its
+/// status is not required to be 2xx. Only faults that carry no credentials at all are rejected.
+private func validateIgneousResponse(
+    _ output: (data: Data, response: URLResponse)
+) throws -> (data: Data, response: URLResponse) {
     guard let response = output.response as? HTTPURLResponse,
-          (200..<300).contains(response.statusCode)
+          response.statusCode != 429, !(500...599).contains(response.statusCode)
     else { throw AppError.networkingFailed }
     return output
+}
+/// Resolves a link the site returns relative to itself, no matter whether it is query-shaped
+/// (`fullimg.php?...`), slash-prefixed (`/fullimg.php?...`) or already absolute. Anything that
+/// resolves to another scheme or host is rejected rather than followed.
+private func resolveSiteRelativeURL(_ value: String) -> URL? {
+    let base = Defaults.URL.host
+    let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard !trimmedValue.isEmpty,
+          let resolvedURL = URL(string: trimmedValue, relativeTo: base)?.absoluteURL,
+          let scheme = resolvedURL.scheme, let host = resolvedURL.host,
+          scheme.caseInsensitiveCompare(base.scheme ?? "") == .orderedSame,
+          host.caseInsensitiveCompare(base.host ?? "") == .orderedSame
+    else { return nil }
+
+    return resolvedURL
+}
+/// Walks a payload as bencode to tell a real `.torrent` file from a page that merely starts with
+/// the right byte. Values are only measured, never decoded: the check answers whether the whole
+/// payload is one well-formed dictionary carrying an `info` dictionary, which every torrent has.
+private struct BencodeValidator {
+    private let bytes: [UInt8]
+    private var index = 0
+
+    private init(_ data: Data) {
+        bytes = [UInt8](data)
+    }
+
+    static func isTorrentFile(_ data: Data) -> Bool {
+        var validator = Self(data)
+        return validator.validateTorrentFile()
+    }
+
+    private mutating func validateTorrentFile() -> Bool {
+        guard consume(UInt8(ascii: "d")) else { return false }
+
+        var hasInfoDictionary = false
+        while let byte = peek(), byte != UInt8(ascii: "e") {
+            guard let key = readByteString() else { return false }
+            let valueIsDictionary = peek() == UInt8(ascii: "d")
+            guard skipValue(depth: 1) else { return false }
+            if valueIsDictionary, key.elementsEqual("info".utf8) {
+                hasInfoDictionary = true
+            }
+        }
+        guard consume(UInt8(ascii: "e")), hasInfoDictionary else { return false }
+
+        // Trailing whitespace is tolerated, trailing content is not: a truncated or padded
+        // payload is not a torrent even when its first bytes parse.
+        while let byte = peek(), [0x09, 0x0A, 0x0D, 0x20].contains(byte) { index += 1 }
+        return index == bytes.count
+    }
+
+    private mutating func skipValue(depth: Int) -> Bool {
+        guard depth <= 16, let byte = peek() else { return false }
+        switch byte {
+        case UInt8(ascii: "i"):
+            return skipInteger()
+        case UInt8(ascii: "l"), UInt8(ascii: "d"):
+            return skipCollection(depth: depth)
+        case UInt8(ascii: "0")...UInt8(ascii: "9"):
+            return readByteString() != nil
+        default:
+            return false
+        }
+    }
+
+    private mutating func skipCollection(depth: Int) -> Bool {
+        let isDictionary = peek() == UInt8(ascii: "d")
+        index += 1
+        while let byte = peek(), byte != UInt8(ascii: "e") {
+            if isDictionary, readByteString() == nil { return false }
+            guard skipValue(depth: depth + 1) else { return false }
+        }
+        return consume(UInt8(ascii: "e"))
+    }
+
+    private mutating func skipInteger() -> Bool {
+        guard consume(UInt8(ascii: "i")) else { return false }
+        if peek() == UInt8(ascii: "-") { index += 1 }
+        let digitsStart = index
+        while let byte = peek(), (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) { index += 1 }
+        return index > digitsStart && consume(UInt8(ascii: "e"))
+    }
+
+    private mutating func readByteString() -> ArraySlice<UInt8>? {
+        let digitsStart = index
+        while let byte = peek(), (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) { index += 1 }
+
+        guard index > digitsStart, index - digitsStart <= 10,
+              let length = Int(String(decoding: bytes[digitsStart..<index], as: UTF8.self)),
+              consume(UInt8(ascii: ":")), bytes.count - index >= length
+        else { return nil }
+
+        let valueStart = index
+        index += length
+        return bytes[valueStart..<index]
+    }
+
+    private func peek() -> UInt8? {
+        index < bytes.count ? bytes[index] : nil
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard peek() == byte else { return false }
+        index += 1
+        return true
+    }
 }
 private extension Dictionary where Key == String, Value == String {
     func formURLEncodedString() -> String {
@@ -151,6 +364,7 @@ struct GreetingRequest: Request {
     var publisher: AnyPublisher<Greeting, AppError> {
         URLSession.shared.dataTaskPublisher(for: Defaults.URL.news)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseGreeting)
             .mapError(mapAppError)
@@ -164,6 +378,7 @@ struct UserInfoRequest: Request {
     var publisher: AnyPublisher<User, AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.userInfo(uid: uid))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseUserInfo)
             .mapError(mapAppError)
@@ -175,6 +390,7 @@ struct FavoriteCategoriesRequest: Request {
     var publisher: AnyPublisher<[Int: String], AppError> {
         URLSession.shared.dataTaskPublisher(for: Defaults.URL.uConfig)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseFavoriteCategories)
             .mapError(mapAppError)
@@ -196,7 +412,9 @@ struct TagTranslatorRequest: Request {
 
     var publisher: AnyPublisher<TagTranslator, AppError> {
         URLSession.shared.dataTaskPublisher(for: language.checkUpdateURL)
-            .genericRetry().tryMap { data, _ -> Date in
+            .genericRetry()
+            .tryMap(validateHTTPResponse)
+            .tryMap { data, _ -> Date in
                 guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let postedDateString = dict["published_at"] as? String,
                       let postedDate = dateFormatter.date(from: postedDateString)
@@ -208,6 +426,7 @@ struct TagTranslatorRequest: Request {
             }
             .flatMap { date in
                 URLSession.shared.dataTaskPublisher(for: language.downloadURL)
+                    .tryMap(validateHTTPResponse)
                     .tryMap { data, _ in
                         let response = try JSONDecoder().decode(EhTagTranslationDatabaseResponse.self, from: data)
                         var translations = response.tagTranslations
@@ -233,6 +452,7 @@ struct SearchGalleriesRequest: Request {
             for: URLUtil.searchList(keyword: keyword, filter: filter)
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
         .mapError(mapAppError)
@@ -243,13 +463,17 @@ struct SearchGalleriesRequest: Request {
 struct MoreSearchGalleriesRequest: Request {
     let keyword: String
     let filter: Filter
+    /// Identifier of the last rendered row. Fallback only: it is absent on an empty page.
     let lastID: String
+    /// The server's verbatim `next=` cursor, preferred whenever the listing exposed one.
+    var nextCursor: String?
 
     var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
         URLSession.shared.dataTaskPublisher(
-            for: URLUtil.moreSearchList(keyword: keyword, filter: filter, lastID: lastID)
+            for: URLUtil.moreSearchList(keyword: keyword, filter: filter, lastID: nextCursor ?? lastID)
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
         .mapError(mapAppError)
@@ -263,6 +487,7 @@ struct FrontpageGalleriesRequest: Request {
     var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.frontpageList(filter: filter))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
             .mapError(mapAppError)
@@ -272,15 +497,21 @@ struct FrontpageGalleriesRequest: Request {
 
 struct MoreFrontpageGalleriesRequest: Request {
     let filter: Filter
+    /// Identifier of the last rendered row. Fallback only: it is absent on an empty page.
     let lastID: String
+    /// The server's verbatim `next=` cursor, preferred whenever the listing exposed one.
+    var nextCursor: String?
 
     var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
-        URLSession.shared.dataTaskPublisher(for: URLUtil.moreFrontpageList(filter: filter, lastID: lastID))
-            .genericRetry()
-            .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
-            .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
-            .mapError(mapAppError)
-            .eraseToAnyPublisher()
+        URLSession.shared.dataTaskPublisher(
+            for: URLUtil.moreFrontpageList(filter: filter, lastID: nextCursor ?? lastID)
+        )
+        .genericRetry()
+        .tryMap(validateHTTPResponse)
+        .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
+        .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
+        .mapError(mapAppError)
+        .eraseToAnyPublisher()
     }
 }
 
@@ -290,6 +521,7 @@ struct PopularGalleriesRequest: Request {
     var publisher: AnyPublisher<[Gallery], AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.popularList(filter: filter))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseGalleries)
             .mapError(mapAppError)
@@ -304,6 +536,7 @@ struct WatchedGalleriesRequest: Request {
     var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.watchedList(filter: filter, keyword: keyword))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
             .mapError(mapAppError)
@@ -313,14 +546,18 @@ struct WatchedGalleriesRequest: Request {
 
 struct MoreWatchedGalleriesRequest: Request {
     let filter: Filter
+    /// Identifier of the last rendered row. Fallback only: it is absent on an empty page.
     let lastID: String
     let keyword: String
+    /// The server's verbatim `next=` cursor, preferred whenever the listing exposed one.
+    var nextCursor: String?
 
     var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
         URLSession.shared.dataTaskPublisher(
-            for: URLUtil.moreWatchedList(filter: filter, lastID: lastID, keyword: keyword)
+            for: URLUtil.moreWatchedList(filter: filter, lastID: nextCursor ?? lastID, keyword: keyword)
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
         .mapError(mapAppError)
@@ -338,6 +575,7 @@ struct FavoritesGalleriesRequest: Request {
             for: URLUtil.favoritesList(favIndex: favIndex, keyword: keyword, sortOrder: sortOrder)
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap {
             (
@@ -353,17 +591,33 @@ struct FavoritesGalleriesRequest: Request {
 
 struct MoreFavoritesGalleriesRequest: Request {
     let favIndex: Int
+    /// Identifier of the last rendered row. Fallback only: it is absent on an empty page.
     let lastID: String
     var lastTimestamp: String
     let keyword: String
+    /// The server's verbatim `next=` cursor (`<gid>-<favoritedTime>`), preferred when present.
+    var nextCursor: String?
+
+    /// `URLUtil` re-joins the two halves with "-", so splitting a server cursor here reproduces
+    /// it byte for byte.
+    private var resolvedCursor: (id: String, timestamp: String) {
+        guard let nextCursor = nextCursor, let separator = nextCursor.firstIndex(of: "-")
+        else { return (lastID, lastTimestamp) }
+        return (
+            String(nextCursor[nextCursor.startIndex..<separator]),
+            String(nextCursor[nextCursor.index(after: separator)...])
+        )
+    }
 
     var publisher: AnyPublisher<(PageNumber, FavoritesSortOrder?, [Gallery]), AppError> {
-        URLSession.shared.dataTaskPublisher(
+        let cursor = resolvedCursor
+        return URLSession.shared.dataTaskPublisher(
             for: URLUtil.moreFavoritesList(
-                favIndex: favIndex, lastID: lastID, lastTimestamp: lastTimestamp, keyword: keyword
+                favIndex: favIndex, lastID: cursor.id, lastTimestamp: cursor.timestamp, keyword: keyword
             )
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap {
             (
@@ -383,6 +637,7 @@ struct DateSeekGalleriesRequest: Request {
     var publisher: AnyPublisher<(PageNumber, [Gallery]), AppError> {
         URLSession.shared.dataTaskPublisher(for: url)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
             .mapError(mapAppError)
@@ -399,6 +654,7 @@ struct ToplistsGalleriesRequest: Request {
             for: URLUtil.toplistsList(catIndex: catIndex, pageNum: pageNum)
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
         .mapError(mapAppError)
@@ -417,6 +673,7 @@ struct MoreToplistsGalleriesRequest: Request {
             )
         )
         .genericRetry()
+        .tryMap(validateHTTPResponse)
         .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
         .tryMap { (Parser.parsePageNum(doc: $0), try Parser.parseGalleries(doc: $0)) }
         .mapError(mapAppError)
@@ -432,6 +689,7 @@ struct GalleryDetailRequest: Request {
     var publisher: AnyPublisher<(GalleryDetail, GalleryState, String, Greeting?), AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.galleryDetail(url: galleryURL))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .compactMap { resp -> HTMLDocument? in
                 var htmlDocument: HTMLDocument?
                 do {
@@ -491,6 +749,7 @@ struct GalleryReverseRequest: Request {
         switch isGalleryImageURL {
         case true:
             return URLSession.shared.dataTaskPublisher(for: url)
+                .tryMap(validateHTTPResponse)
                 .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
                 .tryMap(Parser.parseGalleryURL)
                 .mapError(mapAppError)
@@ -505,6 +764,7 @@ struct GalleryReverseRequest: Request {
 
     func gallery(url: URL) -> AnyPublisher<Gallery, AppError> {
         URLSession.shared.dataTaskPublisher(for: url)
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .compactMap {
                 guard let (detail, _) = try? Parser.parseGalleryDetail(doc: $0, gid: url.pathComponents[2])
@@ -523,6 +783,7 @@ struct GalleryArchiveRequest: Request {
     var publisher: AnyPublisher<(GalleryArchive, String?, String?), AppError> {
         URLSession.shared.dataTaskPublisher(for: archiveURL)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap { (html: HTMLDocument) -> (HTMLDocument, GalleryArchive) in
                 let archive = try Parser.parseGalleryArchive(doc: html)
@@ -551,6 +812,7 @@ struct GalleryArchiveFundsRequest: Request {
 
     func archiveURL(url: URL) -> AnyPublisher<URL, AppError> {
         URLSession.shared.dataTaskPublisher(for: url)
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .compactMap { try? Parser.parseGalleryDetail(doc: $0, gid: gid).0.archiveURL }
             .mapError(mapAppError)
@@ -559,6 +821,7 @@ struct GalleryArchiveFundsRequest: Request {
 
     func funds(url: URL) -> AnyPublisher<(String, String), AppError> {
         URLSession.shared.dataTaskPublisher(for: url)
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseCurrentFunds)
             .mapError(mapAppError)
@@ -573,6 +836,7 @@ struct GalleryTorrentsRequest: Request {
     var publisher: AnyPublisher<[GalleryTorrent], AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.galleryTorrents(gid: gid, token: token))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .map(Parser.parseGalleryTorrents)
             .mapError(mapAppError)
@@ -587,6 +851,7 @@ struct GalleryPreviewURLsRequest: Request {
     var publisher: AnyPublisher<[Int: URL], AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.detailPage(url: galleryURL, pageNum: pageNum))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parsePreviewURLs)
             .mapError(mapAppError)
@@ -600,6 +865,7 @@ struct MPVKeysRequest: Request {
     var publisher: AnyPublisher<(String, [Int: String]), AppError> {
         URLSession.shared.dataTaskPublisher(for: mpvURL)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseMPVKeys)
             .mapError(mapAppError)
@@ -614,6 +880,7 @@ struct ThumbnailURLsRequest: Request {
     var publisher: AnyPublisher<[Int: URL], AppError> {
         URLSession.shared.dataTaskPublisher(for: URLUtil.detailPage(url: galleryURL, pageNum: pageNum))
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseThumbnailURLs)
             .mapError(mapAppError)
@@ -657,6 +924,7 @@ struct GalleryNormalImageURLRequest: Request {
     var publisher: AnyPublisher<(Int, URL, URL?), AppError> {
         URLSession.shared.dataTaskPublisher(for: thumbnailURL)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap { try Parser.parseGalleryNormalImageURL(doc: $0, index: index) }
             .mapError(mapAppError)
@@ -689,6 +957,7 @@ struct GalleryNormalImageURLRefetchRequest: Request {
                 .eraseToAnyPublisher()
         } else {
             return URLSession.shared.dataTaskPublisher(for: URLUtil.detailPage(url: galleryURL, pageNum: pageNum))
+                .tryMap(validateHTTPResponse)
                 .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
                 .tryMap(Parser.parseThumbnailURLs)
                 .compactMap({ thumbnailURLs in thumbnailURLs[index] })
@@ -699,6 +968,7 @@ struct GalleryNormalImageURLRefetchRequest: Request {
 
     func renewThumbnailURL(stored: URL) -> AnyPublisher<(URL, URL), AppError> {
         URLSession.shared.dataTaskPublisher(for: stored)
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap {
                 let identifier = try Parser.parseSkipServerIdentifier(doc: $0)
@@ -712,6 +982,7 @@ struct GalleryNormalImageURLRefetchRequest: Request {
     func imageURL(thumbnailURL: URL, anotherImageURL: URL)
     -> AnyPublisher<(URL, URL, HTTPURLResponse?), AppError> {
         URLSession.shared.dataTaskPublisher(for: thumbnailURL)
+            .tryMap(validateHTTPResponse)
             .tryMap {
                 (try Kanna.HTML(html: $0.data, encoding: .utf8), $0.response as? HTTPURLResponse)
             }
@@ -749,8 +1020,11 @@ struct GalleryMPVImageURLRequest: Request {
         request.httpMethod = "POST"
         request.httpBody = try? JSONSerialization.data(withJSONObject: params, options: [])
 
+        // A POST, but an idempotent lookup: it resolves an image URL without changing any state,
+        // so replaying it is as harmless as replaying a read.
         return URLSession.shared.dataTaskPublisher(for: request)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .map(\.data)
             .tryMap { data in
                 guard let dict = try JSONSerialization
@@ -769,12 +1043,11 @@ struct GalleryMPVImageURLRequest: Request {
 
                 guard let skipServerIdentifier else { throw AppError.parseFailed }
 
-                if let originalImageURLStringSlice = dict["lf"] as? String {
-                    let originalImageURL = Defaults.URL.host.appendingPathComponent(originalImageURLStringSlice)
-                    return (imageURL, originalImageURL, skipServerIdentifier)
-                } else {
-                    return (imageURL, nil, skipServerIdentifier)
-                }
+                // `lf` is a site-relative link, most often the query-shaped `fullimg.php?...`.
+                // Appending it as a path component percent-encodes the `?` and answers 404,
+                // so it is resolved against the site URL instead.
+                let originalImageURL = (dict["lf"] as? String).flatMap(resolveSiteRelativeURL)
+                return (imageURL, originalImageURL, skipServerIdentifier)
             }
             .mapError(mapAppError)
             .eraseToAnyPublisher()
@@ -784,17 +1057,30 @@ struct GalleryMPVImageURLRequest: Request {
 // MARK: Tool
 struct DataRequest: Request {
     let url: URL
+    /// The site answers a missing torrent or an expired session with an HTML page, which must
+    /// never be saved and shared as a `.torrent` file. Turn off for non-torrent payloads.
+    var requiresBencodedPayload = true
 
     var publisher: AnyPublisher<Data, AppError> {
         URLSession.shared.dataTaskPublisher(for: url)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .map(\.data)
+            .tryMap { data in
+                guard !requiresBencodedPayload || BencodeValidator.isTorrentFile(data)
+                else { throw AppError.parseFailed }
+                return data
+            }
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
 }
 
 // MARK: Account Ops
+// None of the mutating requests below retries automatically. No transport failure proves that the
+// POST never reached the server — a redirect can fail after the site already accepted it — so a
+// replay could post the same comment or apply the same vote twice. Failures are surfaced to the
+// caller instead, which lets the user repeat the operation deliberately.
 struct LoginRequest: Request {
     let username: String
     let password: String
@@ -815,7 +1101,7 @@ struct LoginRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
+            .tryMap(validateHTTPResponse)
             .map { $0.response as? HTTPURLResponse }
             .mapError(mapAppError)
             .eraseToAnyPublisher()
@@ -826,6 +1112,7 @@ struct IgneousRequest: Request {
     var publisher: AnyPublisher<HTTPURLResponse, AppError> {
         URLSession.shared.dataTaskPublisher(for: Defaults.URL.exhentai)
             .genericRetry()
+            .tryMap(validateIgneousResponse)
             .compactMap { $0.response as? HTTPURLResponse }
             .mapError(mapAppError)
             .eraseToAnyPublisher()
@@ -840,6 +1127,7 @@ struct VerifyEhProfileRequest: Request {
     var publisher: AnyPublisher<VerifyEhProfileResponse, AppError> {
         URLSession.shared.dataTaskPublisher(for: Defaults.URL.uConfig)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseProfileIndex)
             .mapError(mapAppError)
@@ -871,7 +1159,7 @@ struct EhProfileRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseEhSetting)
             .mapError(mapAppError)
@@ -883,6 +1171,7 @@ struct EhSettingRequest: Request {
     var publisher: AnyPublisher<EhSetting, AppError> {
         URLSession.shared.dataTaskPublisher(for: Defaults.URL.uConfig)
             .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseEhSetting)
             .mapError(mapAppError)
@@ -964,7 +1253,7 @@ struct SubmitEhSettingChangesRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseEhSetting)
             .mapError(mapAppError)
@@ -992,8 +1281,7 @@ struct FavorGalleryRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateFavorMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1015,8 +1303,7 @@ struct UnfavorGalleryRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateUnfavorMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1037,7 +1324,7 @@ struct SendDownloadCommandRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
+            .tryMap(validateHTTPResponse)
             .tryMap { try Kanna.HTML(html: $0.data, encoding: .utf8) }
             .tryMap(Parser.parseDownloadCommandResponse)
             .mapError(mapAppError)
@@ -1067,8 +1354,7 @@ struct RateGalleryRequest: Request {
         request.httpBody = try? JSONSerialization.data(withJSONObject: params, options: [])
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateAPIMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1089,8 +1375,7 @@ struct CommentGalleryRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateCommentMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1113,8 +1398,7 @@ struct EditGalleryCommentRequest: Request {
         request.setURLEncodedContentType()
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateCommentMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1144,8 +1428,7 @@ struct VoteGalleryCommentRequest: Request {
         request.httpBody = try? JSONSerialization.data(withJSONObject: params, options: [])
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateAPIMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
@@ -1175,8 +1458,7 @@ struct VoteGalleryTagRequest: Request {
         request.httpBody = try? JSONSerialization.data(withJSONObject: params, options: [])
 
         return URLSession.shared.dataTaskPublisher(for: request)
-            .genericRetry()
-            .tryMap(validateHTTPResponse)
+            .tryMap(validateAPIMutationResponse)
             .mapError(mapAppError)
             .eraseToAnyPublisher()
     }
