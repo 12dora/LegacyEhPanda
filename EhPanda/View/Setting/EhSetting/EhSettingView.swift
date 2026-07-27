@@ -53,6 +53,11 @@ struct EhSettingView: View {
                 viewStore.send(.setDefaultProfile(profileSet))
             }
         }
+        .progressHUD(
+            config: viewStore.hudConfig,
+            unwrapping: viewStore.$route,
+            case: /EhSettingReducer.Route.hud
+        )
         .sheet(unwrapping: viewStore.$route, case: /EhSettingReducer.Route.webView) { route in
             WebView(url: route.wrappedValue)
                 .ignoresSafeArea(edges: .bottom)

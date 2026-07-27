@@ -67,12 +67,40 @@ where State == Base.State, Action == Base.Action {
     @ReducerBuilder<State, Action>
     var body: some Reducer<State, Action> {
         Reduce { state, action in
-            if case .setting(.binding(let bindingAction)) = action as? AppReducer.Action {
-                Logger.info("setting(EhPanda.SettingReducer.Action.\(bindingAction.customDumpDescription)")
-            } else {
-                Logger.info(action)
+            if let event = Self.allowListedEvent(action) {
+                Logger.info(event)
             }
             return base.reduce(into: &state, action: action)
+        }
+    }
+
+    // Actions carry user content: login and cookie bindings hold plaintext passwords and
+    // reusable session cookies, and search/comment actions hold private text. Formatting
+    // every action reflected those values into a release file destination that keeps ten
+    // files in the file-sharing enabled Documents directory, and it added a per-action
+    // formatting cost to hot reader paths. Only payload-free lifecycle events are named
+    // here, and never their associated values.
+    private static func allowListedEvent(_ action: Action) -> String? {
+        guard let action = action as? AppReducer.Action else { return nil }
+        switch action {
+        case .onScenePhaseChange(let scenePhase):
+            return "app.scenePhase.\(scenePhase)"
+        case .appDelegate(.onLaunchFinish):
+            return "app.launchFinished"
+        case .appDelegate(.migration(.onDatabasePreparationSuccess)):
+            return "app.databaseReady"
+        case .appLock(.lockApp):
+            return "appLock.locked"
+        case .appLock(.unlockApp):
+            return "appLock.unlocked"
+        case .setting(.loadUserSettingsDone):
+            return "setting.userSettingsLoaded"
+        case .setting(.account(.login(.onCredentialsInstalled))):
+            return "account.credentialsInstalled"
+        case .setting(.account(.onLogoutConfirmButtonTapped)):
+            return "account.loggedOut"
+        default:
+            return nil
         }
     }
 }

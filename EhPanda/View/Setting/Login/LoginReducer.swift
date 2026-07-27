@@ -45,6 +45,7 @@ struct LoginReducer: Reducer {
         case teardown
         case login
         case loginDone(Result<HTTPURLResponse?, AppError>)
+        case onCredentialsInstalled
     }
 
     @Dependency(\.hapticsClient) private var hapticsClient
@@ -80,18 +81,32 @@ struct LoginReducer: Reducer {
 
             case .loginDone(let result):
                 state.route = nil
-                var effects = [Effect<Action>]()
+                // Credential installation and cross-host cookie sync must complete before
+                // anything observes `didLogin` or issues an authenticated request. Merging
+                // them alongside the outcome, as before, let the parent's authenticated
+                // fetches start against a session that had not been written yet.
+                return .run { send in
+                    if case .success(let response) = result, let response = response {
+                        cookieClient.setCredentials(response: response)
+                    }
+                    cookieClient.removeYay()
+                    cookieClient.syncExCookies()
+                    cookieClient.fulfillAnotherHostField()
+                    await send(.onCredentialsInstalled)
+                }
+
+            case .onCredentialsInstalled:
                 if cookieClient.didLogin {
                     state.loginState = .idle
-                    effects.append(.run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) }))
+                    // The credentials are installed; the typed ones must not linger in
+                    // observable state any longer than the request needs them.
+                    state.username = ""
+                    state.password = ""
+                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) })
                 } else {
                     state.loginState = .failed(.unknown)
-                    effects.append(.run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) }))
+                    return .run(operation: { _ in hapticsClient.generateNotificationFeedback(.error) })
                 }
-                if case .success(let response) = result, let response = response {
-                    effects.append(.run(operation: { _ in cookieClient.setCredentials(response: response) }))
-                }
-                return .merge(effects)
             }
         }
         .haptics(

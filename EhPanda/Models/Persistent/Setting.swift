@@ -27,7 +27,9 @@ struct Setting: Codable, Equatable {
     var translatesTags = false
     var showsTagsSearchSuggestion = false
     var showsImagesInTags = false
-    var redirectsLinksToSelectedHost = false
+    // `redirectsLinksToSelectedHost` used to live here. It was never read outside this
+    // model and its own toggle, so the control promised a host rewrite that no lookup,
+    // fetch or cache path ever performed. Removed rather than left as a lying switch.
     var detectsLinksFromClipboard = false
     var backgroundBlurRadius: Double = 10
     var autoLockPolicy: AutoLockPolicy = .never
@@ -35,7 +37,11 @@ struct Setting: Codable, Equatable {
     // Appearance
     var listDisplayMode: ListDisplayMode = DeviceUtil.isPadWidth ? .thumbnail : .detail
     var preferredColorScheme = PreferredColorScheme.automatic
-    var accentColor: Color = .blue
+    // Stored as the project's own color representation so this blob no longer depends on a
+    // retroactive `Codable` conformance on the imported `Color`. `CodingKeys` maps it back to
+    // the `accentColor` key and the encoded shape is unchanged, so persisted settings still
+    // decode. `accentColor` below stays a read/write `Color` for the views and their bindings.
+    var accentColorStorage: CodableColor = .blue
     var appIconType: AppIconType = .default
     var showsTagsInList = false
     var listTagsNumberMaximum = 0
@@ -53,6 +59,42 @@ struct Setting: Codable, Equatable {
 
     // Laboratory
     var bypassesSNIFiltering = false
+
+    var accentColor: Color {
+        get { accentColorStorage.color }
+        set { accentColorStorage = CodableColor(newValue) ?? accentColorStorage }
+    }
+
+    // Declared explicitly only so `accentColorStorage` keeps writing and reading the historical
+    // `accentColor` key. Every other case matches its property name, exactly as the synthesized
+    // keys did. A stored property missing from this list would silently stop being encoded.
+    enum CodingKeys: String, CodingKey {
+        case galleryHost
+        case showsNewDawnGreeting
+        case enablesTagsExtension
+        case translatesTags
+        case showsTagsSearchSuggestion
+        case showsImagesInTags
+        case detectsLinksFromClipboard
+        case backgroundBlurRadius
+        case autoLockPolicy
+        case listDisplayMode
+        case preferredColorScheme
+        case accentColorStorage = "accentColor"
+        case appIconType
+        case showsTagsInList
+        case listTagsNumberMaximum
+        case displaysJapaneseTitle
+        case readingDirection
+        case prefetchLimit
+        case enablesLandscape
+        case enablesDualPageMode
+        case exceptCover
+        case contentDividerHeight
+        case maximumScaleFactor
+        case doubleTapScaleFactor
+        case bypassesSNIFiltering
+    }
 }
 
 enum GalleryHost: String, Codable, Equatable, CaseIterable, Identifiable {
@@ -196,14 +238,13 @@ extension Setting {
         translatesTags = (try? container?.decodeIfPresent(Bool.self, forKey: .translatesTags)) ?? false
         showsTagsSearchSuggestion = (try? container?.decodeIfPresent(Bool.self, forKey: .showsTagsSearchSuggestion)) ?? false
         showsImagesInTags = (try? container?.decodeIfPresent(Bool.self, forKey: .showsImagesInTags)) ?? false
-        redirectsLinksToSelectedHost = (try? container?.decodeIfPresent(Bool.self, forKey: .redirectsLinksToSelectedHost)) ?? false
         detectsLinksFromClipboard = (try? container?.decodeIfPresent(Bool.self, forKey: .detectsLinksFromClipboard)) ?? false
         backgroundBlurRadius = (try? container?.decodeIfPresent(Double.self, forKey: .backgroundBlurRadius)) ?? 10
         autoLockPolicy = (try? container?.decodeIfPresent(AutoLockPolicy.self, forKey: .autoLockPolicy)) ?? .never
         // Appearance
         listDisplayMode = (try? container?.decodeIfPresent(ListDisplayMode.self, forKey: .listDisplayMode)) ?? (DeviceUtil.isPadWidth ? .thumbnail : .detail)
         preferredColorScheme = (try? container?.decodeIfPresent(PreferredColorScheme.self, forKey: .preferredColorScheme)) ?? .automatic
-        accentColor = (try? container?.decodeIfPresent(Color.self, forKey: .accentColor)) ?? .blue
+        accentColorStorage = (try? container?.decodeIfPresent(CodableColor.self, forKey: .accentColorStorage)) ?? .blue
         appIconType = (try? container?.decodeIfPresent(AppIconType.self, forKey: .appIconType)) ?? .default
         showsTagsInList = (try? container?.decodeIfPresent(Bool.self, forKey: .showsTagsInList)) ?? false
         listTagsNumberMaximum = (try? container?.decodeIfPresent(Int.self, forKey: .listTagsNumberMaximum)) ?? 0

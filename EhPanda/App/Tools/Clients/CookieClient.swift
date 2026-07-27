@@ -26,27 +26,24 @@ extension CookieClient {
             }
         },
         getCookie: { url, key in
-            var value = CookieValue(
-                rawValue: "", localizedString: L10n.Localizable.Struct.CookieValue.LocalizedString.none
-            )
+            var value = CookieValue.missing
             guard let cookies = HTTPCookieStorage.shared.cookies(for: url), !cookies.isEmpty else { return value }
 
             cookies.forEach { cookie in
                 guard let expiresDate = cookie.expiresDate, cookie.name == key && !cookie.value.isEmpty else { return }
                 guard expiresDate > .now else {
-                    value = CookieValue(
-                        rawValue: "", localizedString: L10n.Localizable.Struct.CookieValue.LocalizedString.expired
-                    )
+                    value = .expired
                     return
                 }
                 guard cookie.value != Defaults.Cookie.mystery else {
                     value = CookieValue(
-                        rawValue: cookie.value, localizedString:
-                            L10n.Localizable.Struct.CookieValue.LocalizedString.mystery
+                        rawValue: cookie.value,
+                        localizedString: L10n.Localizable.Struct.CookieValue.LocalizedString.mystery,
+                        validity: .mystery
                     )
                     return
                 }
-                value = CookieValue(rawValue: cookie.value, localizedString: "")
+                value = CookieValue(rawValue: cookie.value, localizedString: "", validity: .valid)
             }
 
             return value
@@ -181,11 +178,14 @@ extension CookieClient {
         let igneous = getCookie(host.url, igneousKey)
         let memberID = getCookie(host.url, memberIDKey)
         let passHash = getCookie(host.url, passHashKey)
+        // The editing text is deliberately left empty. The stored value is surfaced through
+        // the field placeholder instead, so a reload never seeds the editors with raw
+        // secrets that a later unrelated edit would write back and resurrect.
         return .init(
             host: host,
-            igneous: .init(key: igneousKey, value: igneous, editingText: igneous.rawValue),
-            memberID: .init(key: memberIDKey, value: memberID, editingText: memberID.rawValue),
-            passHash: .init(key: passHashKey, value: passHash, editingText: passHash.rawValue)
+            igneous: .init(key: igneousKey, value: igneous),
+            memberID: .init(key: memberIDKey, value: memberID),
+            passHash: .init(key: passHashKey, value: passHash)
         )
     }
     func getCookiesDescription(host: GalleryHost) -> String {
@@ -204,16 +204,16 @@ extension CookieClient {
 extension CookieClient {
     func setCookies(state: CookiesState, trimsSpaces: Bool = true) {
         for subState in state.allCases {
+            let value = trimsSpaces
+            ? subState.editingText.trimmingCharacters(in: .whitespaces) : subState.editingText
+            // Only fields the user actually typed into are written. Untouched fields keep an
+            // empty editing text, so editing one cookie can no longer rewrite the others from
+            // a stale buffer and restore a session that was just cleared.
+            guard !value.isEmpty, value != subState.value.rawValue else { continue }
             for cookie in state.host.cookieURLs {
-                setOrEditCookie(
-                    for: cookie,
-                    key: subState.key,
-                    value: trimsSpaces
-                    ? subState.editingText .trimmingCharacters(in: .whitespaces) : subState.editingText
-                )
+                setOrEditCookie(for: cookie, key: subState.key, value: value)
             }
         }
-
     }
     func setCredentials(response: HTTPURLResponse) {
         guard let setString = response.allHeaderFields["Set-Cookie"] as? String else { return }

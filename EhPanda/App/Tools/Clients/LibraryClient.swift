@@ -17,7 +17,7 @@ import ComposableArchitecture
 struct LibraryClient {
     let initializeLogger: () -> Void
     let initializeWebImage: () -> Void
-    let clearWebImageDiskCache: () -> Void
+    let clearWebImageCache: () async -> Void
     let analyzeImageColors: (UIImage) async -> UIImageColors?
     let calculateWebImageDiskCacheSize: () async -> UInt?
 }
@@ -25,6 +25,7 @@ struct LibraryClient {
 extension LibraryClient {
     static let live: Self = .init(
         initializeLogger: {
+            LibraryClient.purgeCredentialBearingLogsIfNeeded()
             // MARK: SwiftyBeaver
             let file = FileDestination()
             let console = ConsoleDestination()
@@ -68,15 +69,27 @@ extension LibraryClient {
             KingfisherManager.shared.downloader.downloadTimeout = 30
             KingfisherManager.shared.defaultOptions += [
                 .processor(WebPProcessor.default),
-                .cacheSerializer(WebPSerializer.default)
+                // The reader serializer wraps `WebPSerializer` and additionally rejects
+                // known site placeholders. Registering it here rather than relying on a
+                // later append makes the placeholder-evicting path deterministic.
+                .cacheSerializer(ReaderImageCacheSerializer.default)
             ]
         },
-        clearWebImageDiskCache: {
-            KingfisherManager.shared.cache.clearDiskCache()
-            Task {
-                await ReaderImagePipeline.shared.removeAllMemory()
-                try? await ReaderImageDataCache.shared.removeAll()
+        clearWebImageCache: {
+            // One awaitable operation. Speculative transfers are stopped first so nothing
+            // repopulates the stores mid-clear, then both Kingfisher stores and both reader
+            // stores are dropped before the caller recalculates the published size.
+            await MainActor.run {
+                ReaderImagePrefetchCoordinator.shared.stopAll()
             }
+            KingfisherManager.shared.cache.clearMemoryCache()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                KingfisherManager.shared.cache.clearDiskCache {
+                    continuation.resume()
+                }
+            }
+            await ReaderImagePipeline.shared.removeAllMemory()
+            try? await ReaderImageDataCache.shared.removeAll()
         },
         analyzeImageColors: { image in
             await withCheckedContinuation { continuation in
@@ -95,6 +108,26 @@ extension LibraryClient {
             return (kingfisherSize ?? 0) + UInt(readerSize)
         }
     )
+
+    // Logs written before action logging was reduced to payload-free events can still
+    // contain plaintext passwords and reusable cookies, and they live in the file-sharing
+    // enabled Documents directory. Delete them exactly once, before any destination is
+    // attached and can append to them.
+    private static let credentialLogPurgeKey = "logs.credentialBearingPurge.v1"
+
+    private static func purgeCredentialBearingLogsIfNeeded() {
+        let userDefaults = UserDefaults.standard
+        guard !userDefaults.bool(forKey: credentialLogPurgeKey) else { return }
+        userDefaults.set(true, forKey: credentialLogPurgeKey)
+
+        guard let directoryURL = FileUtil.logsDirectoryURL,
+              let fileNames = try? FileManager.default.contentsOfDirectory(atPath: directoryURL.path)
+        else { return }
+
+        for fileName in fileNames where fileName.contains(Defaults.FilePath.ehpandaLog) {
+            try? FileManager.default.removeItem(at: directoryURL.appendingPathComponent(fileName))
+        }
+    }
 }
 
 // MARK: API
@@ -116,7 +149,7 @@ extension LibraryClient {
     static let noop: Self = .init(
         initializeLogger: {},
         initializeWebImage: {},
-        clearWebImageDiskCache: {},
+        clearWebImageCache: {},
         analyzeImageColors: { _ in .none },
         calculateWebImageDiskCacheSize: { .none }
     )
@@ -124,7 +157,7 @@ extension LibraryClient {
     static let unimplemented: Self = .init(
         initializeLogger: XCTestDynamicOverlay.unimplemented("\(Self.self).initializeLogger"),
         initializeWebImage: XCTestDynamicOverlay.unimplemented("\(Self.self).initializeWebImage"),
-        clearWebImageDiskCache: XCTestDynamicOverlay.unimplemented("\(Self.self).clearWebImageDiskCache"),
+        clearWebImageCache: XCTestDynamicOverlay.unimplemented("\(Self.self).clearWebImageCache"),
         analyzeImageColors: XCTestDynamicOverlay.unimplemented("\(Self.self).analyzeImageColors"),
         calculateWebImageDiskCacheSize:
             XCTestDynamicOverlay.unimplemented("\(Self.self).calculateWebImageDiskCacheSize")

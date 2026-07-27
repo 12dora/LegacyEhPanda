@@ -42,7 +42,11 @@ extension UIApplicationClient {
             }
         },
         setUserInterfaceStyle: { userInterfaceStyle in
-            (DeviceUtil.keyWindow ?? DeviceUtil.anyWindow)?.overrideUserInterfaceStyle = userInterfaceStyle
+            // The theme is a global preference but the override is per window, so writing
+            // only the key window leaves every other connected iPad scene on the old theme.
+            DeviceUtil.allWindows.forEach { window in
+                window.overrideUserInterfaceStyle = userInterfaceStyle
+            }
         }
     )
     @MainActor

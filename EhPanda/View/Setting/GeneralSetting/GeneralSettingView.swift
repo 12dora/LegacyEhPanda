@@ -19,7 +19,6 @@ struct GeneralSettingView: View {
     @Binding private var translatesTags: Bool
     @Binding private var showsTagsSearchSuggestion: Bool
     @Binding private var showsImagesInTags: Bool
-    @Binding private var redirectsLinksToSelectedHost: Bool
     @Binding private var detectsLinksFromClipboard: Bool
     @Binding private var backgroundBlurRadius: Double
     @Binding private var autoLockPolicy: AutoLockPolicy
@@ -29,7 +28,7 @@ struct GeneralSettingView: View {
         tagTranslatorLoadingState: LoadingState, tagTranslatorEmpty: Bool,
         tagTranslatorHasCustomTranslations: Bool, enablesTagsExtension: Binding<Bool>,
         translatesTags: Binding<Bool>, showsTagsSearchSuggestion: Binding<Bool>,
-        showsImagesInTags: Binding<Bool>, redirectsLinksToSelectedHost: Binding<Bool>,
+        showsImagesInTags: Binding<Bool>,
         detectsLinksFromClipboard: Binding<Bool>, backgroundBlurRadius: Binding<Double>,
         autoLockPolicy: Binding<AutoLockPolicy>
     ) {
@@ -42,7 +41,6 @@ struct GeneralSettingView: View {
         _translatesTags = translatesTags
         _showsTagsSearchSuggestion = showsTagsSearchSuggestion
         _showsImagesInTags = showsImagesInTags
-        _redirectsLinksToSelectedHost = redirectsLinksToSelectedHost
         _detectsLinksFromClipboard = detectsLinksFromClipboard
         _backgroundBlurRadius = backgroundBlurRadius
         _autoLockPolicy = autoLockPolicy
@@ -126,10 +124,6 @@ struct GeneralSettingView: View {
             }
             Section(L10n.Localizable.GeneralSettingView.Section.Title.navigation) {
                 Toggle(
-                    L10n.Localizable.GeneralSettingView.Title.redirectsLinksToTheSelectedHost,
-                    isOn: $redirectsLinksToSelectedHost
-                )
-                Toggle(
                     L10n.Localizable.GeneralSettingView.Title.detectsLinksFromClipboard,
                     isOn: $detectsLinksFromClipboard
                 )
@@ -211,7 +205,6 @@ struct GeneralSettingView_Previews: PreviewProvider {
                 translatesTags: .constant(false),
                 showsTagsSearchSuggestion: .constant(false),
                 showsImagesInTags: .constant(false),
-                redirectsLinksToSelectedHost: .constant(false),
                 detectsLinksFromClipboard: .constant(false),
                 backgroundBlurRadius: .constant(10),
                 autoLockPolicy: .constant(.never)

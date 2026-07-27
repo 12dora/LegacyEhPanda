@@ -35,6 +35,13 @@ struct DeviceUtil {
             .compactMap({ $0 as? UIWindowScene }).last?
             .windows.last
     }
+    // Multiple scenes are supported, and window-level overrides such as the user
+    // interface style are per window, so anything global has to reach all of them.
+    static var allWindows: [UIWindow] {
+        UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows)
+    }
 
     static var isLandscape: Bool {
         [.landscapeLeft, .landscapeRight]

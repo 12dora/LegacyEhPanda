@@ -45,24 +45,37 @@ private extension Color {
     }
 }
 
-extension Color: Codable {
-    enum CodingKeys: String, CodingKey {
-        case red, green, blue
+/// A project-owned, round-trippable representation of a `SwiftUI.Color`.
+///
+/// Retroactively conforming the imported `Color` to the imported `Codable` protocols is what the
+/// compiler warns about — and what would collide outright if the SDK ever declares those
+/// conformances — so every type of this project encodes its colors through this value instead.
+/// The encoded shape (`red`/`green`/`blue`) is deliberately identical to the retroactive
+/// conformance this replaced, which keeps already persisted payloads readable.
+struct CodableColor: Codable, Equatable, Hashable {
+    /// `Color.blue` resolved in the sRGB space. It is a constant rather than a resolution of the
+    /// dynamic system color so that constructing a default value neither depends on the current
+    /// trait collection nor touches UIKit on whatever thread the value is created on.
+    static let blue = CodableColor(red: 0, green: 0.478_431_37, blue: 1)
+
+    let red: Double
+    let green: Double
+    let blue: Double
+
+    init(red: Double, green: Double, blue: Double) {
+        self.red = red
+        self.green = green
+        self.blue = blue
     }
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let red = try container.decode(Double.self, forKey: .red)
-        let green = try container.decode(Double.self, forKey: .green)
-        let blue = try container.decode(Double.self, forKey: .blue)
-        self.init(red: red, green: green, blue: blue)
+    init?(_ color: Color?) {
+        guard let components = color?.colorComponents else { return nil }
+        red = .init(components.red)
+        green = .init(components.green)
+        blue = .init(components.blue)
     }
 
-    public func encode(to encoder: Encoder) throws {
-        guard let colorComponents = self.colorComponents else { return }
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(colorComponents.red, forKey: .red)
-        try container.encode(colorComponents.green, forKey: .green)
-        try container.encode(colorComponents.blue, forKey: .blue)
+    var color: Color {
+        .init(red: red, green: green, blue: blue)
     }
 }

@@ -213,8 +213,8 @@ private struct CookieRow: View {
                 .submitLabel(.done).disableAutocorrection(true)
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.none)
-            Image(systemSymbol: cookieState.value.isInvalid ? .xmarkCircle : .checkmarkCircle)
-                .foregroundStyle(cookieState.value.isInvalid ? .red : .green)
+            Image(systemSymbol: cookieState.value.isValid ? .checkmarkCircle : .xmarkCircle)
+                .foregroundStyle(cookieState.value.isValid ? .green : .red)
         }
     }
 }

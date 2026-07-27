@@ -62,7 +62,6 @@ private extension SettingView {
                 translatesTags: viewStore.$setting.translatesTags,
                 showsTagsSearchSuggestion: viewStore.$setting.showsTagsSearchSuggestion,
                 showsImagesInTags: viewStore.$setting.showsImagesInTags,
-                redirectsLinksToSelectedHost: viewStore.$setting.redirectsLinksToSelectedHost,
                 detectsLinksFromClipboard: viewStore.$setting.detectsLinksFromClipboard,
                 backgroundBlurRadius: viewStore.$setting.backgroundBlurRadius,
                 autoLockPolicy: viewStore.$setting.autoLockPolicy

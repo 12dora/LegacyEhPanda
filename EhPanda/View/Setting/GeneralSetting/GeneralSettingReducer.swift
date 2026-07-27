@@ -73,11 +73,17 @@ struct GeneralSettingReducer: Reducer {
                 return .none
 
             case .clearWebImageCache:
-                return .merge(
-                    .run(operation: { _ in libraryClient.clearWebImageDiskCache() }),
-                    .run(operation: { _ in await databaseClient.removeImageURLs() }),
-                    .send(.calculateWebImageDiskCache)
-                )
+                // Strictly ordered: the caches and the persisted URLs must both be gone
+                // before the size is recalculated, otherwise the UI publishes a stale
+                // number and the cleared pages silently repopulate from a live prefetch.
+                return .run { send in
+                    await libraryClient.clearWebImageCache()
+                    let result = await databaseClient.removeImageURLs()
+                    if case .failure(let error) = result {
+                        Logger.error("Failed to remove cached image URLs.", context: ["error": "\(error)"])
+                    }
+                    await send(.calculateWebImageDiskCache)
+                }
 
             case .checkPasscodeSetting:
                 state.passcodeNotSet = authorizationClient.passcodeNotSet()

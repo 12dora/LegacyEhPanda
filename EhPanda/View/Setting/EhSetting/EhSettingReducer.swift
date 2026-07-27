@@ -10,6 +10,7 @@ import ComposableArchitecture
 
 struct EhSettingReducer: Reducer {
     enum Route: Equatable {
+        case hud
         case webView(URL)
         case deleteProfile
     }
@@ -25,6 +26,10 @@ struct EhSettingReducer: Reducer {
         @BindingState var ehProfile: EhProfile?
         var loadingState: LoadingState = .idle
         var submittingState: LoadingState = .idle
+        // A submission that the server semantically rejects now reports a failure instead
+        // of silently looking like a success, so it needs somewhere to be shown. Replacing
+        // the form with an error view would discard the edits, so it is surfaced as a toast.
+        var hudConfig: AppToastConfig = .error
 
         mutating func setEhSetting(_ ehSetting: EhSetting) {
             guard let ehProfile = ehSetting.ehProfiles.first(where: \.isSelected)
@@ -120,6 +125,8 @@ struct EhSettingReducer: Reducer {
                     state.setEhSetting(ehSetting)
                 case .failure(let error):
                     state.submittingState = .failed(error)
+                    state.hudConfig = .error
+                    return .send(.setNavigation(.hud))
                 }
                 return .none
 
@@ -140,6 +147,8 @@ struct EhSettingReducer: Reducer {
                     state.setEhSetting(ehSetting)
                 case .failure(let error):
                     state.submittingState = .failed(error)
+                    state.hudConfig = .error
+                    return .send(.setNavigation(.hud))
                 }
                 return .none
             }

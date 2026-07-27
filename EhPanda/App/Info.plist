@@ -146,8 +146,12 @@
 	<string>We need this permission to save images to your photo library.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
+		<!-- M-48: the app has a single process-wide feature store, one global theme window, one
+		     key-window touch handler and one orientation mask, so additional scenes mirror each
+		     other's routes, tabs and locks. Declining extra scenes is the honest fix until the
+		     navigation state is genuinely scene-owned. -->
 		<key>UIApplicationSupportsMultipleScenes</key>
-		<true/>
+		<false/>
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>

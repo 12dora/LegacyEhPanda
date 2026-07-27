@@ -68,7 +68,12 @@ struct AccountSettingReducer: Reducer {
                 return route == nil ? .send(.clearSubStates) : .none
 
             case .onLogoutConfirmButtonTapped:
-                return .send(.loadCookies)
+                // The parent owns the ordered clear → reload sequence, so this must not
+                // race it with its own reload. Dropping the values here additionally means
+                // there is no window in which the logged-out screen still holds them.
+                state.ehCookiesState.clearValues()
+                state.exCookiesState.clearValues()
+                return .none
 
             case .clearSubStates:
                 state.loginState = .init()
@@ -91,7 +96,10 @@ struct AccountSettingReducer: Reducer {
                     .run(operation: { _ in hapticsClient.generateNotificationFeedback(.success) })
                 )
 
-            case .login(.loginDone):
+            // `loginDone` only means the request returned; the credentials are not installed
+            // until the login reducer has finished writing and cross-host syncing them, so
+            // `didLogin` is only meaningful from here on.
+            case .login(.onCredentialsInstalled):
                 return cookieClient.didLogin ? .send(.setNavigation(nil)) : .none
 
             case .login:
@@ -113,16 +121,37 @@ struct AccountSettingReducer: Reducer {
 }
 
 // MARK: Models
+// A missing cookie has an empty raw value and a nonempty localized string, an expired one
+// the same, and a present one the opposite. Deriving validity from those two strings
+// therefore reported missing and expired credentials as valid; validity is now explicit.
+enum CookieValidity: Equatable {
+    case valid
+    case missing
+    case expired
+    case mystery
+}
+
 struct CookieValue: Equatable {
     static let empty: Self = .init(
-        rawValue: .init(), localizedString: .init()
+        rawValue: .init(), localizedString: .init(), validity: .missing
+    )
+    static let missing: Self = .init(
+        rawValue: .init(),
+        localizedString: L10n.Localizable.Struct.CookieValue.LocalizedString.none,
+        validity: .missing
+    )
+    static let expired: Self = .init(
+        rawValue: .init(),
+        localizedString: L10n.Localizable.Struct.CookieValue.LocalizedString.expired,
+        validity: .expired
     )
 
     let rawValue: String
     let localizedString: String
+    let validity: CookieValidity
 
-    var isInvalid: Bool {
-        !localizedString.isEmpty && !rawValue.isEmpty
+    var isValid: Bool {
+        validity == .valid
     }
     var placeholder: String {
         localizedString.isEmpty ? rawValue : localizedString
@@ -146,16 +175,25 @@ struct CookiesState: Equatable {
     var igneous: CookieState
     var memberID: CookieState
     var passHash: CookieState
+
+    // Drops every secret while keeping the row identities, so a logged-out screen holds
+    // nothing that a later edit could write back.
+    mutating func clearValues() {
+        igneous.clearValue()
+        memberID.clearValue()
+        passHash.clearValue()
+    }
 }
 
 struct CookieState: Equatable {
-    static let empty: Self = .init(
-        key: "", value: .init(
-            rawValue: "", localizedString: ""
-        )
-    )
+    static let empty: Self = .init(key: "", value: .empty)
 
     let key: String
     var value: CookieValue
     var editingText = ""
+
+    mutating func clearValue() {
+        value = .empty
+        editingText = ""
+    }
 }
