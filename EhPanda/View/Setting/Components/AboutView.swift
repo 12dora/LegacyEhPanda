@@ -77,11 +77,9 @@ struct AboutView: View {
         .init(
             urlString: L10n.Constant.App.Contact.Link.telegram,
             text: L10n.Constant.App.Contact.Text.telegram
-        ),
-        .init(
-            urlString: L10n.Constant.App.Contact.Link.altStore,
-            text: L10n.Localizable.AboutView.Button.altStoreSource
         )
+        // The AltStore source row was removed: its link points at an upstream
+        // `AltStore.json` that no longer exists and was never a source for this fork.
     ]}()
 
     // MARK: Special thanks
@@ -185,10 +183,6 @@ struct AboutView: View {
         .init(
             urlString: L10n.Constant.App.Acknowledgement.Link.swiftyBeaver,
             text: L10n.Constant.App.Acknowledgement.Text.swiftyBeaver
-        ),
-        .init(
-            urlString: L10n.Constant.App.Acknowledgement.Link.waterfallGrid,
-            text: L10n.Constant.App.Acknowledgement.Text.waterfallGrid
         ),
         .init(
             urlString: L10n.Constant.App.Acknowledgement.Link.swiftyOpenCC,
