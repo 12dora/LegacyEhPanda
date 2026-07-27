@@ -6,21 +6,6 @@
 //
 
 import Foundation
-import DeprecatedAPI
-
-// MARK: Global
-private func forceDowncast<T>(object: Any) -> T! {
-    if let downcastedValue = object as? T {
-        return downcastedValue
-    }
-    Logger.error(
-        "Failed in force downcasting...",
-        context: [
-            "type": T.self
-        ]
-    )
-    return nil
-}
 
 // MARK: URL
 extension URL {
@@ -66,78 +51,10 @@ extension URLSessionConfiguration {
     }
 }
 
-// MARK: CFHTTPMessage
-extension CFHTTPMessage {
-    var isCompleted: Bool {
-        CFHTTPMessageIsHeaderComplete(self)
-    }
-    var url: URL? {
-        CFHTTPMessageCopyRequestURL(self)?.autorelease()
-            .takeUnretainedValue() as URL?
-    }
-    var allHeaderFields: [String: String] {
-        CFHTTPMessageCopyAllHeaderFields(self)?.autorelease()
-            .takeUnretainedValue() as? [String: String] ?? [String: String]()
-    }
-    func httpResponse() -> HTTPURLResponse? {
-        guard let url = url as URL? else { return nil }
-        let version = CFHTTPMessageCopyVersion(self)
-            .autorelease().takeUnretainedValue() as String
-        let code = CFHTTPMessageGetResponseStatusCode(self) as Int
-
-        return HTTPURLResponse(
-            url: url,
-            statusCode: code,
-            httpVersion: version,
-            headerFields: allHeaderFields
-        )
-    }
-}
-
 // MARK: URLRequest
 extension URLRequest {
-    var isHTTPS: Bool { url?.scheme == "https" }
-    var hasHostField: Bool { hostKey?.count ?? 0 > 0 }
-    var hostKey: Dictionary<String, String>.Keys.Element? {
-        allHTTPHeaderFields?.keys.first(where: { $0.lowercased() == "host" })
-    }
-    var domain: String? {
-        var domain: String? = url?.host
-
-        if let allFields = allHTTPHeaderFields, let hostKey = hostKey {
-            domain = allFields[hostKey]
-        }
-
-        return domain
-    }
-    var domainWithScheme: String? {
-        if let scheme = url?.scheme, let domain = domain {
-            return scheme + "://" + domain
-        } else {
-            return nil
-        }
-    }
-    func domainIPReplaced() -> URLRequest {
-        var request: URLRequest = self
-
-        guard let domain = domain,
-              let resolvedIP = DomainResolver
-                .resolve(domain: domain),
-              let url = request.url?.replaceHost(
-                to: resolvedIP
-              )
-        else { return request }
-
-        request.url = url
-
-        if hasHostField == false {
-            request.addValue(domain, forHTTPHeaderField: "Host")
-        }
-        return request
-    }
     func HTTPBody() -> Data? {
-        if httpMethod != "POST" ||
-            httpBody != nil { return httpBody }
+        if let httpBody = httpBody { return httpBody }
 
         guard let stream = httpBodyStream
         else { return nil }
@@ -170,89 +87,60 @@ extension URLRequest {
 
         return body
     }
-}
 
-// MARK: InputStream
-extension InputStream {
-    enum CreateStreamError: Error {
-        case methodNotFound(msg: String)
-        case urlNotFound(msg: String)
-        case createStream(msg: String)
-    }
-
-    var trust: SecTrust? {
-        let key = Stream.PropertyKey(kCFStreamPropertySSLPeerTrust as String)
-        guard let value = property(forKey: key) else { return nil }
-        return forceDowncast(object: value) as SecTrust
-    }
-    func invalidatesCertChain(for host: String) {
-        guard host.count > 0 else { return }
-        let settings: [AnyHashable: Any] = [
-            kCFStreamSSLValidatesCertificateChain: kCFBooleanFalse as Any
-        ]
-
-        let key = kCFStreamPropertySSLSettings as String
-        setProperty(settings, forKey: Stream.PropertyKey(key))
-    }
-    func httpMessage() -> CFHTTPMessage? {
-        let stream = self as CFReadStream
-
-        let key = "kCFStreamPropertyHTTPResponseHeader" as CFString
-        guard let value = CFReadStreamCopyProperty(
-            stream, CFStreamPropertyKey(rawValue: key)
-        ) else { return nil }
-
-        return forceDowncast(object: value) as CFHTTPMessage
-    }
-
-    static func create(from request: URLRequest) -> Result<InputStream, CreateStreamError> {
-        guard let method = request.httpMethod as CFString? else {
-            return .failure(.methodNotFound(
-                msg: "HTTPMethod not found: \(request.httpMethod ?? "nil")."
-            ))
-        }
-        guard let url = request.url as CFURL? else {
-            return .failure(.urlNotFound(
-                msg: "URL not found: \(request.url?.absoluteString ?? "nil")."
-            ))
-        }
-
-        let message = CFHTTPMessageCreateRequest(
-            kCFAllocatorDefault, method,
-            url, kCFHTTPVersion1_1
+    /// Serializes the request as an HTTP/1.1 message for a raw byte transport.
+    ///
+    /// `host` carries the real hostname, which the transport keeps out of the
+    /// endpoint it connects to.
+    func serializedHTTPMessage(host: String, body: Data?) -> Data? {
+        guard let url = url, let components = URLComponents(
+            url: url, resolvingAgainstBaseURL: false
         )
-        .autorelease()
-        .takeUnretainedValue()
+        else { return nil }
 
-        request.allHTTPHeaderFields?.forEach { field, value in
-            CFHTTPMessageSetHeaderFieldValue(
-                message, field as CFString,
-                value as CFString
-            )
+        var target = components.percentEncodedPath
+        if target.isEmpty { target = "/" }
+        if let query = components.percentEncodedQuery { target += "?" + query }
+
+        let method = (httpMethod ?? "GET").uppercased()
+        var fields = allHTTPHeaderFields ?? .init()
+
+        func setField(_ name: String, to value: String?) {
+            for key in fields.keys where key.caseInsensitiveCompare(name) == .orderedSame {
+                fields.removeValue(forKey: key)
+            }
+            if let value = value { fields[name] = value }
         }
 
-        if request.hasHostField == false {
-            CFHTTPMessageSetHeaderFieldValue(
-                message, "host" as CFString,
-                request.domain as CFString?
-            )
+        // One connection is opened per request and no response decoder is
+        // wired up, so the exchange stays uncompressed and close delimited.
+        setField("Host", to: nil)
+        setField("Connection", to: "close")
+        setField("Accept-Encoding", to: "identity")
+
+        let length = body?.count ?? 0
+        if length > 0 || ["POST", "PUT", "PATCH"].contains(method) {
+            setField("Content-Length", to: String(length))
+        } else {
+            setField("Content-Length", to: nil)
         }
 
-        if let body = request.HTTPBody() as CFData? {
-            CFHTTPMessageSetBody(message, body)
+        // A hand-built message must not let a stray line break inside a field
+        // smuggle extra request lines onto the wire.
+        func sanitized(_ text: String) -> String {
+            text.components(separatedBy: CharacterSet(charactersIn: "\r\n")).joined()
         }
 
-        guard let stream = DeprecatedAPI.getCFReadStream(
-            kCFAllocatorDefault, message
-        )
-        .autorelease()
-        .takeUnretainedValue() as InputStream? else {
-            return .failure(.createStream(msg: "Create Stream error."))
+        var lines = ["\(method) \(target) HTTP/1.1", "Host: \(sanitized(host))"]
+        for (field, value) in fields {
+            let name = sanitized(field)
+            guard !name.isEmpty else { continue }
+            lines.append("\(name): \(sanitized(value))")
         }
 
-        let key = "kCFStreamPropertyHTTPAttemptPersistentConnection" as CFString
-        stream.setProperty(true, forKey: key as Stream.PropertyKey)
+        var message = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+        if let body = body { message.append(body) }
 
-        return .success(stream)
+        return message
     }
 }
