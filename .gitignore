@@ -9,3 +9,11 @@ latest/
 *.xcarchive
 *.xcresult
 .grok/
+
+# Build/test artefacts and AI-agent working notes (may contain local paths/hostnames) stay out of git
+coverage/
+.nyc_output/
+prompt-archives/
+.omo/
+**/scratchpad/
+.claude/settings.local.json
